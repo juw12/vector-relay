@@ -304,6 +304,22 @@ class CommandTests(Case):
         self.assertIn("vector_relay.py pair --open", on.stdout)
         self.assertEqual(run(self.folder, "listen", "--wait", "1").returncode, 3)
 
+    def test_a_python_without_the_packages_hands_the_command_to_one_that_has_them(self) -> None:
+        bare = [sys.executable, "-S", str(REPO / "vector_relay.py")]  # -S: this Python sees no installed packages
+        env = {**os.environ, "VECTOR_RELAY_HOME": str(self.folder), "PYTHONIOENCODING": "utf-8",
+               "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")}
+        env.pop("VECTOR_RELAY_HANDED_OVER", None)
+        done = subprocess.run([*bare, "pair"], capture_output=True, timeout=120, env=env, encoding="utf-8")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(relay.paired(relay.settings(self.folder)))
+        self.assertTrue(Path((self.folder / "python.txt").read_text(encoding="utf-8")).is_file())
+
+        nowhere_to_go = subprocess.run(
+            [*bare, "status"], capture_output=True, timeout=60, env={**env, "VECTOR_RELAY_HANDED_OVER": "1"}, encoding="utf-8",
+        )
+        self.assertEqual(nowhere_to_go.returncode, 2)
+        self.assertIn("pip install cryptography segno pillow", nowhere_to_go.stdout)
+
     def test_pair_needs_no_address_and_the_page_is_at_the_relay(self) -> None:
         self.assertEqual(run(self.folder, "pair").returncode, 0)
         found = relay.settings(self.folder)

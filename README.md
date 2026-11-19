@@ -46,6 +46,8 @@ a Cloudflare Pages project with one Pages Function (`functions/`) and one D1 dat
 ## Set it up (once)
 
 1. Python 3.10 or newer, then `pip install cryptography segno pillow`.
+   A chat app may run commands with a Python of its own that lacks these. Vector Relay then
+   hands the command to the Python on the PC that has them, by itself.
 2. `python vector_relay.py pair --open`
    A QR code opens on the PC. Scan it with the phone's camera.
 3. On the iPhone: Share, then **Add to Home Screen**.
@@ -93,7 +95,7 @@ the last chat leaves phone mode.
 
 ## Tests
 
-    python -m unittest discover -s tests   38 tests: seal, feed, inbox, chats, pictures, commands, whole trips
+    python -m unittest discover -s tests   39 tests: seal, feed, inbox, chats, pictures, commands, whole trips
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
                                            (as a Pixel 7), relay rules in memory: 41 steps
     python scripts/e2e.py --live           the same steps on the deployed page and relay, on a

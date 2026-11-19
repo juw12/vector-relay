@@ -974,6 +974,55 @@ def command_forget(folder: Path) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- the right Python
+NEEDS = {"cryptography": "cryptography", "segno": "segno", "PIL": "pillow"}  # module -> its pip name
+
+
+def lacking() -> list[str]:
+    """The packages this Python does not have."""
+    from importlib.util import find_spec
+
+    return [pip_name for module, pip_name in NEEDS.items() if find_spec(module) is None]
+
+
+def python_with_packages(folder: Path) -> str:
+    """A Python on this PC that has the packages, or "".
+
+    A chat app may run its commands with a Python of its own that lacks them, while the Python the
+    packages were installed for sits on the PATH. The one found is remembered for the next call.
+    """
+    kept = folder / "python.txt"
+    candidates = [str(read_text(kept)).strip()]
+    names = ("python.exe", "python3.exe") if os.name == "nt" else ("python3", "python")
+    for place in os.environ.get("PATH", "").split(os.pathsep):
+        candidates += [str(Path(place) / name) for name in names if place]
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        installed = Path(os.environ["LOCALAPPDATA"]).glob("Programs/Python/Python3*/python.exe")
+        candidates += sorted((str(path) for path in installed), reverse=True)
+    tried: set[str] = set()
+    for candidate in candidates:
+        same = os.path.normcase(os.path.abspath(candidate)) if candidate else ""
+        if not same or same in tried or not os.path.isfile(candidate):
+            continue
+        tried.add(same)
+        try:
+            probe = subprocess.run([candidate, "-c", "import " + ", ".join(NEEDS)], capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            folder.mkdir(parents=True, exist_ok=True)
+            kept.write_text(candidate, encoding="utf-8")
+            return candidate
+    return ""
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def main(arguments: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -1006,6 +1055,14 @@ def main(arguments: list[str] | None = None) -> int:
     commands.add_parser("forget", help="unlink every phone and clear the feed")
     chosen = parser.parse_args(arguments)
     folder = home()
+    short = lacking()
+    if short:  # hand the same command to a Python that has the packages (once: no going round in circles)
+        other = "" if os.environ.get("VECTOR_RELAY_HANDED_OVER") else python_with_packages(folder)
+        if other:
+            again = [other, str(Path(__file__).resolve()), *(sys.argv[1:] if arguments is None else arguments)]
+            return subprocess.call(again, env={**os.environ, "VECTOR_RELAY_HANDED_OVER": "1"})
+        print(f"This Python lacks: {', '.join(short)}. Run:  \"{sys.executable}\" -m pip install {' '.join(short)}")
+        return 2
     if chosen.command == "pair":
         return command_pair(folder, chosen.relay, chosen.page, chosen.show_link, chosen.open)
     if chosen.command == "on":
