@@ -1,0 +1,13 @@
+# The phone page (docs/) and the relay (functions/) as one Cloudflare Pages project.
+#   npx wrangler d1 create vector-relay                                (put the id below)
+#   npx wrangler d1 execute vector-relay --remote --file schema.sql
+#   npx wrangler pages project create vector-relay --production-branch main
+#   npx wrangler pages deploy --branch main
+name = "vector-relay"
+pages_build_output_dir = "docs"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vector-relay"
+database_id = "72a99cdd-9e13-4502-8f36-4dd1f5b0cbd3"

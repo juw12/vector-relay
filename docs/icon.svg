@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Vector Relay">
+  <rect width="64" height="64" rx="14" fill="#2f5b8c"/>
+  <path d="M19 45 L45 19" stroke="#fffdf8" stroke-width="9" stroke-linecap="round" fill="none"/>
+  <circle cx="45" cy="19" r="4.5" fill="#d9481f"/>
+</svg>

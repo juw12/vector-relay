@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vector Relay</title>
+<meta name="description" content="See and steer the AI chats on your own PC from your phone, through a relay that only holds ciphertext.">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#2f5b8c" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#201f1c" media="(prefers-color-scheme: dark)">
+<!-- No manifest, on purpose: without one an iPhone keeps this page's whole address, the key after
+     the # included, as what the Home Screen icon opens. An icon has its own storage, so the
+     address is the only way the key gets there. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Vector Relay">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css?v=1.0.0">
+</head>
+<body>
+<header class="bar">
+  <h1 class="brand"><img src="icon.svg" alt="" width="24" height="24">Vector Relay<span id="label" class="label"></span></h1>
+  <p class="status" role="status"><span id="dot" class="dot"></span><span id="status">Opening</span></p>
+</header>
+
+<nav id="chats" class="chats" aria-label="Chats in phone mode" hidden></nav>
+
+<main id="feed" class="feed" aria-live="polite" aria-label="What the chat on your PC said"></main>
+
+<section id="none" class="sheet" hidden>
+  <h2>This phone is not linked yet</h2>
+  <p>Vector Relay shows the AI chats that run on your own PC, and takes your next prompt to them.</p>
+  <ol>
+    <li>On the PC, type <strong>/phone</strong> in a chat.</li>
+    <li>Scan the QR code it shows with this phone's camera.</li>
+  </ol>
+  <p class="soft">The code holds a key that only your PC and this phone have. The relay in between passes sealed text it cannot read. Your phone needs the internet, not the same Wi-Fi as the PC.</p>
+</section>
+
+<aside id="hint" class="hint" hidden>
+  <p><strong>Keep it as an app:</strong> tap Share, then <strong>Add to Home Screen</strong>. The icon takes your key along, so do not share this page's address.</p>
+  <button id="hintClose" type="button">OK</button>
+</aside>
+
+<div id="preview" class="preview" hidden>
+  <img id="previewPicture" alt="The photo you are about to send">
+  <button id="previewRemove" type="button">Remove photo</button>
+</div>
+
+<form id="composer" class="composer" hidden>
+  <input id="photo" type="file" accept="image/*" hidden>
+  <button id="attach" class="attach" type="button" aria-label="Add a photo">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 8h3l1.5-2h7L17 8h3v11H4zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/></svg>
+  </button>
+  <label class="hidden" for="box">Prompt for the chat on your PC</label>
+  <textarea id="box" rows="1" placeholder="Prompt for Vector" autocomplete="off"></textarea>
+  <button id="send" class="send" type="submit">Send</button>
+</form>
+
+<noscript><p class="sheet">This page needs JavaScript: it opens the sealed text from your PC on this phone.</p></noscript>
+<script src="app.js?v=1.0.0"></script>
+</body>
+</html>

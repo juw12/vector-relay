@@ -1,0 +1,6 @@
+__pycache__/
+.tmp/
+*.pyc
+.wrangler/
+node_modules/
+shots/*-live.png
