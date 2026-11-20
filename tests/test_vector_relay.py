@@ -491,5 +491,131 @@ class TripTests(Case):
         self.assertEqual(relay.read_feed(self.folder), [])
 
 
+def free_port() -> int:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class LocalTests(Case):
+    """Local mode: no relay. This PC serves the page and answers the phone itself."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.port = free_port()
+
+    def pair(self) -> Phone:
+        made = run(self.folder, "pair", "--local", "--host", "127.0.0.1", "--port", str(self.port))
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        return Phone(relay.settings(self.folder))
+
+    def page(self, path: str) -> tuple[int, str, str]:
+        try:
+            with DIRECT.open(f"http://127.0.0.1:{self.port}{path}", timeout=10) as reply:
+                return reply.status, reply.headers.get("Content-Type", ""), reply.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as error:
+            return error.code, "", ""
+
+    def test_pair_local_names_this_pc_and_its_port(self) -> None:
+        made = run(self.folder, "pair", "--local", "--port", str(self.port))
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        found = relay.settings(self.folder)
+        address = f"http://{relay.local_name()}:{self.port}"
+        self.assertTrue(relay.local_name().endswith(".local"))
+        self.assertEqual((found["relay"], found["page"], found["local"]), (address, address + "/", self.port))
+        self.assertIn("same Wi-Fi", made.stdout)
+        self.assertNotIn(found["key"], made.stdout)
+
+    def test_local_mode_takes_only_this_pc_and_its_own_network(self) -> None:
+        for host in ("example.com", "8.8.8.8", "172.32.0.1"):
+            self.assertEqual(run(self.folder, "pair", "--local", "--host", host).returncode, 2, host)
+        self.assertEqual(relay.settings(self.folder), {})
+        for host in ("192.168.1.10", "10.0.0.7", "172.16.4.2", "my-pc.local"):
+            self.assertEqual(run(self.folder, "pair", "--local", "--host", host, "--port", str(self.port)).returncode, 0, host)
+
+    def test_going_local_makes_a_new_key(self) -> None:
+        run(self.folder, "pair", "--relay", "https://relay.example.pages.dev")
+        through_a_relay = relay.settings(self.folder)["key"]
+        self.pair()
+        local = relay.settings(self.folder)["key"]
+        self.assertNotEqual(through_a_relay, local)
+        self.pair()
+        self.assertEqual(relay.settings(self.folder)["key"], local)
+
+    def test_prompt_from_the_phone_and_result_back_with_no_relay(self) -> None:
+        phone = self.pair()
+        chat = run(self.folder, "on", "--label", "Local").stdout.split("chat=")[1][:4]
+        self.assertTrue(relay.helper_running(self.folder))
+        started = time.time()
+        feed = phone.ask("feed", after=0)
+        self.assertLess(time.time() - started, 2)
+        self.assertEqual([(entry["id"], entry["label"], entry["on"]) for entry in feed["chats"]], [(chat, "Local", True)])
+        listener = subprocess.Popen(
+            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--wait", "30", "--chat", chat], stdout=subprocess.PIPE,
+            encoding="utf-8", env={**os.environ, "VECTOR_RELAY_HOME": str(self.folder)},
+        )
+        deadline = time.time() + 10
+        while time.time() < deadline and not relay.listening(self.folder, chat):
+            time.sleep(0.1)
+        self.assertTrue(phone.ask("prompt", pid="local-prompt-01", text="再跑一次\nplease", chat=chat)["ok"])
+        heard, _ = listener.communicate(timeout=20)
+        self.assertEqual(heard.split("\n", 2)[2].rstrip("\n"), "再跑一次\nplease")
+        run(self.folder, "say", "--chat", chat, "--kind", "result", "Done: 0.04 mm")
+        texts = [event["text"] for event in phone.ask("feed", after=0)["events"]]
+        self.assertEqual(texts[-2:], ["再跑一次\nplease", "Done: 0.04 mm"])
+        self.assertIn("Mode:       local", run(self.folder, "status").stdout)
+
+    def test_this_pc_serves_the_page_and_nothing_else(self) -> None:
+        phone = self.pair()
+        run(self.folder, "on")
+        status, kind, body = self.page("/")
+        self.assertEqual((status, kind), (200, "text/html; charset=utf-8"))
+        self.assertIn("softcrypto.js", body)
+        for name in ("app.js", "softcrypto.js", "styles.css", "icon.svg"):
+            self.assertEqual(self.page("/" + name + "?v=1")[0], 200, name)
+        for path in ("/vector_relay.py", "/settings.json", "/..%2fsettings.json", "/docs/app.js", "/c/", "/c/wrong-channel-000000/state"):
+            self.assertEqual(self.page(path)[0], 404, path)
+        found = relay.settings(self.folder)
+        for secret in (found["key"], found["write"]):
+            self.assertNotIn(secret, body)
+        status, body = phone.http("GET", "/state")
+        self.assertEqual(status, 200)
+        self.assertNotIn("Phone mode on", body)
+        self.assertEqual(relay.unseal(phone.key, body)["events"][0]["text"], "Phone mode on")
+
+    def test_a_question_sealed_with_another_key_gets_no_feed(self) -> None:
+        phone = self.pair()
+        run(self.folder, "on")
+        phone.key = os.urandom(32)
+        ask_id = secrets.token_urlsafe(12)
+        self.assertEqual(phone.http("POST", "/ask/" + ask_id, relay.seal(phone.key, {"route": "feed", "t": 0}))[0], 200)
+        status, body = phone.http("GET", "/answer/" + ask_id)
+        self.assertEqual(status, 200)
+        self.assertIsNone(relay.unseal(phone.key, body))
+        answer = relay.unseal(relay.unb64(relay.settings(self.folder)["key"]), body)
+        self.assertEqual(answer, {"ok": False, "error": "key"})
+
+    def test_the_helper_starts_again_right_after_it_stopped(self) -> None:
+        self.pair()
+        run(self.folder, "on")
+        self.assertIn("stopped", run(self.folder, "stop").stdout)
+        again = run(self.folder, "on")
+        self.assertEqual(again.returncode, 0, again.stdout)
+        self.assertTrue(relay.helper_running(self.folder))
+
+    def test_forget_unlinks_the_phone_without_a_relay(self) -> None:
+        phone = self.pair()
+        run(self.folder, "on")
+        phone.ask("feed", after=0)
+        forgot = run(self.folder, "forget")
+        self.assertIn("no longer linked", forgot.stdout)
+        self.assertFalse(relay.helper_running(self.folder))
+        found = relay.settings(self.folder)
+        self.assertEqual(sorted(found), ["local", "page", "relay"])
+        self.assertEqual(relay.read_feed(self.folder), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 """The phone page in a real browser engine, talking to the helper through a relay.
 
-    python scripts/e2e.py                      WebKit as an iPhone, relay rules in memory on this PC
+    python scripts/e2e.py                      WebKit as an iPhone, relay rules in memory on this PC,
+                                               then local mode: the page from this PC over its Wi-Fi address
     python scripts/e2e.py --live               the same steps on the deployed page and relay (a
                                                throwaway channel that is wiped at the end)
 
@@ -14,6 +15,7 @@ import argparse
 import functools
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -101,6 +103,166 @@ class Quiet(SimpleHTTPRequestHandler):
         pass
 
 
+def wifi_address() -> str:
+    """This PC's address on its own network, or "" when it has none."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))  # nothing is sent: this only asks which way out would be taken
+        found = probe.getsockname()[0]
+    except OSError:
+        found = ""
+    finally:
+        probe.close()
+    return found if relay.RELAY_ADDRESS.match(f"http://{found}") else ""
+
+
+def local_trip(playwright, expect) -> None:
+    """Local mode: no relay. The page comes from this PC over its Wi-Fi address, as plain http,
+    so the browser lends no AES and the page seals with softcrypto.js."""
+    host = wifi_address()
+    if not host:
+        print("SKIP  local mode: this PC has no address on a private network")
+        return
+    folder = Path(tempfile.mkdtemp(prefix="e2e-local-", dir=REPO / ".tmp"))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    try:
+        paired = run(folder, "pair", "--local", "--host", host, "--port", str(port))
+        check(paired.returncode == 0 and "same Wi-Fi" in paired.stdout, "local mode: pair --local makes a code for this PC's own address")
+        found = relay.settings(folder)
+        address = found["page"] + "#r=" + relay.ticket(found)
+        chat = run(folder, "on", "--label", "Local chat").stdout.split("chat=")[1][:4]
+        webkit = playwright.webkit.launch()
+        context = webkit.new_context(**playwright.devices["iPhone 14"])
+        page = context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+        page.goto(address)
+        expect(page.locator(".item.note .text")).to_have_text("Phone mode on: Local chat", timeout=15_000)
+        check(page.evaluate("!(window.crypto && window.crypto.subtle)"), "local mode: the page came over plain http, where the browser lends no AES")
+        check(True, "local mode: the page from this PC opens the sealed feed with its own AES")
+        listener = listen(folder, chat)
+        expect(page.locator("#status")).to_have_text("Vector is waiting for your prompt", timeout=15_000)
+        prompt = "本機模式 works?\nsecond line"
+        page.locator("#box").fill(prompt)
+        sent = time.time()
+        page.locator("#send").tap()
+        heard, _ = listener.communicate(timeout=30)
+        took = time.time() - sent
+        check(heard.split("\n", 2)[2].rstrip("\n") == prompt, f"local mode: a prompt reaches the chat with no relay ({took:.1f} s)")
+        expect(page.locator(".item.prompt .meta")).to_contain_text("picked up", timeout=15_000)
+
+        plot = folder / "plot.png"
+        draw_plot(plot)
+        run(folder, "say", "--chat", chat, "--kind", "result", "--image", str(plot), "The plot.")
+        picture = page.locator(".item.result .pic img").last
+        expect(picture).to_be_visible(timeout=30_000)
+        page.wait_for_function("document.querySelector('.item.result:last-of-type .pic img').naturalWidth > 0", timeout=15_000)
+        check(picture.evaluate("image => image.naturalWidth") == 1600, "local mode: a picture from the chat opens on the phone")
+
+        photo = folder / "photo.jpg"
+        take_photo(photo)
+        listener = listen(folder, chat)
+        page.locator("#photo").set_input_files(str(photo))
+        expect(page.locator("#preview")).to_be_visible(timeout=15_000)
+        page.locator("#box").fill("and a photo")
+        page.locator("#send").tap()
+        heard, _ = listener.communicate(timeout=60)
+        lines = heard.splitlines()
+        kept = Path(lines[2][6:]) if len(lines) > 3 and lines[2].startswith("IMAGE ") else None
+        check(kept is not None and kept.read_bytes()[:3] == b"\xff\xd8\xff" and lines[3] == "and a photo", "local mode: a photo from the phone reaches the chat")
+        page.screenshot(path=str(REPO / "shots" / "phone-local.png"))
+
+        check(not errors, "local mode: no errors on the page" + (": " + "; ".join(errors[:3]) if errors else ""))
+        run(folder, "stop")  # from here the browser itself reports requests that fail
+        expect(page.locator("#status")).to_contain_text("cannot reach your PC", timeout=45_000)
+        check(True, "local mode: with the helper stopped the phone says it cannot reach the PC")
+        context.close()
+        webkit.close()
+    finally:
+        run(folder, "forget")
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def device_trip(playwright, expect) -> None:
+    """Two independent pairings, even with identical chat IDs and labels."""
+    scratch = REPO / '.tmp'
+    scratch.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+        root = Path(temporary)
+        fake = FakeRelay()
+        site = ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Quiet, directory=str(REPO / 'docs')))
+        threading.Thread(target=site.serve_forever, daemon=True).start()
+        base = f'http://127.0.0.1:{site.server_port}/'
+        hosts = []
+        browser = None
+        try:
+            for name in ('mac', 'asus'):
+                host = root / name
+                host.mkdir()
+                while relay.helper_running(host):
+                    host = Path(tempfile.mkdtemp(dir=root))
+                hosts.append(host)
+                assert run(host, 'pair', '--relay', fake.address, '--page', base).returncode == 0
+                relay.write_json(host / 'chats.json', {'abcd': {'label': 'Identical chat', 'on': False, 'since': int(time.time())}})
+                assert run(host, 'on', '--chat', 'abcd', '--label', 'Identical chat').returncode == 0
+                assert run(host, 'say', '--chat', 'abcd', '--kind', 'result', name + ' feed').returncode == 0
+            mac, asus = hosts
+            urls = [base + '#r=' + relay.ticket(relay.settings(host)) for host in hosts]
+            browser = playwright.webkit.launch()
+            context = browser.new_context(**playwright.devices['iPhone 14'])
+            context.add_init_script("Object.defineProperty(navigator, 'standalone', {get: () => true});")
+            page = context.new_page()
+            page.goto(urls[0])
+            expect(page.locator('.item.result .text')).to_have_text('mac feed')
+            page.locator('#menu').tap()
+            page.locator('#renameDevice').tap()
+            page.locator('#deviceName').fill('MacBook')
+            page.locator('#saveDevice').tap()
+            expect(page.locator('#sendTarget')).to_have_text('To: MacBook')
+            page.locator('#addDevice').tap()
+            page.locator('#deviceName').fill('ASUS laptop')
+            page.locator('#deviceLink').fill(base)
+            page.locator('#saveDevice').tap()
+            expect(page.locator('#deviceError')).to_be_visible()
+            page.locator('#deviceLink').fill(urls[1])
+            page.locator('#saveDevice').tap()
+            expect(page.locator('#sendTarget')).to_have_text('To: ASUS laptop')
+            expect(page.locator('.item.result .text')).to_have_text('asus feed')
+            page.locator('#box').fill('ASUS only')
+            page.locator('#send').tap()
+            expect(page.locator('.item.prompt .meta')).to_contain_text('waiting for the chat')
+            assert not relay.waiting_ids(mac)
+            assert relay.take_prompt(asus, 'abcd')['text'] == 'ASUS only'
+            check(True, 'devices: a prompt sent to the ASUS pairing arrives only there, even with an identical chat ID')
+            page.goto('about:blank')
+            page.goto(urls[0])
+            expect(page.locator('#sendTarget')).to_have_text('To: ASUS laptop')
+            expect(page.locator('.item.result .text')).to_have_text('asus feed')
+            check(True, 'devices: reopening from the original Mac Home Screen URL remembers the chosen ASUS')
+            page.locator('#menu').tap()
+            page.locator('#devicePicker').select_option(label='MacBook')
+            expect(page.locator('#sendTarget')).to_have_text('To: MacBook')
+            expect(page.locator('.item.result .text')).to_have_text('mac feed')
+            expect(page.locator('.item.prompt')).to_have_count(0)
+            page.locator('#box').fill('Mac only')
+            page.locator('#send').tap()
+            expect(page.locator('.item.prompt .meta')).to_contain_text('waiting for the chat')
+            assert not relay.waiting_ids(asus)
+            assert relay.take_prompt(mac, 'abcd')['text'] == 'Mac only'
+            check(True, 'devices: switching back restores the Mac feed and sends only to the Mac')
+        finally:
+            if browser is not None:
+                browser.close()
+            for host in hosts:
+                run(host, 'stop')
+            fake.close()
+            site.shutdown()
+            site.server_close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help=f"use the deployed page and relay at {relay.RELAY}")
@@ -157,12 +319,20 @@ def main() -> int:
             page.goto(address)
             expect(page.locator(".item.note .text")).to_have_text("Phone mode on: Atlas FA", timeout=slow)
             check(True, "the page opens the sealed feed: 'Phone mode on: Atlas FA'")
-            expect(page.locator("#label")).to_have_text("· Atlas FA")
+            expect(page.locator("#title")).to_have_text("Atlas FA")
+            check(page.locator("#box").get_attribute("placeholder") == "Send follow-up", "the bar names the chat, the prompt box reads as in the app")
             expect(page.locator("#status")).to_contain_text("Vector is working", timeout=slow)
             check(True, "status: working while the chat is not listening")
             check("#r=" in page.url, "on an iPhone the key stays in the address, for the Home Screen icon")
             check(page.locator("#hint").is_visible(), "the Add to Home Screen hint shows on an iPhone in the browser")
-            check(page.locator("#chats").is_hidden(), "one chat in phone mode: no chat picker in the way")
+            check(page.locator("#chats").is_hidden() and page.locator("#menuNew").is_hidden(), "the chat list stays out of the way until its button is tapped")
+            page.locator("#menu").tap()
+            expect(page.locator("#chats .chip.chosen .name")).to_have_text("Atlas FA")
+            check(page.locator(".chip").count() == 1 and page.locator(".chip .spin").count() == 1 and page.locator(".chip .when").inner_text() == "now",
+                  "the chat list shows the one chat as the app does: its name, working, 'now'")
+            page.locator("#shade").tap(position={"x": 370, "y": 400})
+            expect(page.locator("#chats")).to_be_hidden()
+            check(True, "a tap beside the chat list closes it")
 
             listener = listen(folder, atlas)
             expect(page.locator("#status")).to_have_text("Vector is waiting for your prompt", timeout=slow)
@@ -243,12 +413,22 @@ def main() -> int:
             on = run(folder, "on", "--label", "Weekly report")
             weekly = on.stdout.split("chat=")[1][:4]
             expect(page.locator("#chats .chip")).to_have_count(2, timeout=slow)
-            check(page.locator(".chip.chosen .name").inner_text() == "Atlas FA", "a second chat goes into phone mode: both show as chips, the first stays chosen")
             run(folder, "say", "--chat", weekly, "--kind", "result", "Slide 3 is updated from today's mail.")
+            expect(page.locator("#menuNew")).to_be_visible(timeout=slow)
+            check(page.locator(".item", has_text="Slide 3 is updated").count() == 0, "what the other chat says is marked on the chat list button, and stays out of this chat's feed")
+            page.locator("#menu").tap()
             expect(page.locator(".chip:not(.chosen) .new")).to_be_visible(timeout=slow)
-            check(page.locator(".item", has_text="Slide 3 is updated").count() == 0, "what the other chat says is marked on its chip, and stays out of this chat's feed")
+            check(page.locator(".chip.chosen .name").inner_text() == "Atlas FA", "a second chat goes into phone mode: both are in the chat list, the first stays chosen")
+            page.locator("#find").fill("week")
+            expect(page.locator("#chats .chip")).to_have_count(1)
+            check(page.locator(".chip .name").inner_text() == "Weekly report", "'Search chats' narrows the list")
+            page.locator("#find").fill("")
+            expect(page.locator("#chats .chip")).to_have_count(2)
+            page.wait_for_timeout(300)
             page.screenshot(path=str(REPO / "shots" / f"phone-chats{suffix}.png"))
             page.locator(".chip:not(.chosen)").tap()
+            expect(page.locator("#chats")).to_be_hidden()
+            expect(page.locator("#title")).to_have_text("Weekly report")
             expect(page.locator(".item.result .text")).to_have_text("Slide 3 is updated from today's mail.", timeout=slow)
             check(page.locator(".item", has_text="Atlas O-ring squeeze").count() == 0 and page.locator(".chip .new").count() == 0,
                   "a tap on the chip shows that chat alone, and the mark is gone")
@@ -263,6 +443,7 @@ def main() -> int:
             run(folder, "off", "--chat", weekly)
             expect(page.locator("#status")).to_contain_text("This chat left phone mode", timeout=slow)
             check(page.locator("#send").is_disabled(), "that chat leaves phone mode: the phone says so and does not let a prompt go nowhere")
+            page.locator("#menu").tap()
             page.locator(".chip", has_text="Atlas FA").tap()
             expect(page.locator("#status")).to_have_text("Vector is waiting for your prompt", timeout=slow)
             page.locator("#box").fill("back to atlas")
@@ -342,6 +523,9 @@ def main() -> int:
             chromium.close()
 
             check(not errors, "no errors on the page" + (": " + "; ".join(errors[:3]) if errors else ""))
+            if not chosen.relay:
+                local_trip(playwright, expect)
+                device_trip(playwright, expect)
     finally:
         forgot = run(folder, "forget")
         if chosen.relay:

@@ -22,6 +22,9 @@ A prompt is carried out once: its id is remembered, and one older than PROMPT_MA
 so a recorded prompt cannot be played again and one the phone marked "not sent" does not arrive later.
 
 Data lives in %LOCALAPPDATA%\\VectorRelay (or the folder VECTOR_RELAY_HOME names).
+
+Local mode (`pair --local`) needs no relay and no internet: this PC serves the phone page itself and
+answers the phone directly, for a phone on the same Wi-Fi. Everything is sealed the same way.
 """
 
 from __future__ import annotations
@@ -43,14 +46,29 @@ import urllib.parse
 import urllib.request
 import zlib
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
 CHAT_ID = re.compile(r"^[a-z0-9]{4}$")
-RELAY_ADDRESS = re.compile(r"^(https://[^/\s]+|http://(127\.0\.0\.1|localhost)(:\d+)?)$")
+# http is for this PC and its own network only: a name ending in .local, or a private address
+NEAR = r"(127\.0\.0\.1|localhost|[A-Za-z0-9-]+\.local|10(\.\d{1,3}){3}|192\.168(\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(\.\d{1,3}){2})"
+RELAY_ADDRESS = re.compile(r"^(https://[^/\s]+|http://" + NEAR + r"(:\d+)?)$")
+LOCAL_PORT = 47990  # local mode: where this PC serves the phone page
+DOCS = Path(__file__).resolve().parent / "docs"
+PAGE_FILES = {
+    "": "index.html", "index.html": "index.html", "app.js": "app.js", "softcrypto.js": "softcrypto.js",
+    "styles.css": "styles.css", "icon.svg": "icon.svg", "icon-180.png": "icon-180.png",
+}
+PAGE_TYPES = {
+    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml", ".png": "image/png",
+}
+MAX_ASK_BYTES = 1_200_000  # one sealed question from the phone, as the relay allows
+ANSWERS_KEPT, ANSWER_KEPT_S = 60, 300
 
 MAX_PROMPT = 20_000  # characters in one prompt from the phone
 PROMPT_MAX_AGE_S = 15  # shorter than the phone waits (20 s): a prompt the phone gave up on is never carried out later
@@ -336,6 +354,7 @@ def feed_answer(folder: Path, after: int = 0, limit: int = FEED_EVENTS, text_max
     chosen.reverse()
     return {
         "ok": True, "v": VERSION, "pc": int(time.time()), "mode": mode(folder), "listening": listening(folder),
+        "deviceName": (os.environ.get("VECTOR_RELAY_DEVICE_NAME") or socket.gethostname().split(".")[0])[:40],
         "chats": chat_list(folder), "waiting": waiting_ids(folder), "last": last, "events": chosen,
     }
 
@@ -567,6 +586,18 @@ def guard_port(folder: Path) -> int:
     return 47800 + zlib.crc32(str(folder.resolve()).lower().encode("utf-8")) % 150
 
 
+def local_name() -> str:
+    """The name this PC answers to on its own network, which stays when its address changes."""
+    name = socket.gethostname().split(".")[0]
+    if sys.platform == "darwin":
+        try:
+            asked = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True, timeout=5)
+            name = asked.stdout.strip() or name
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return name + ".local"
+
+
 def helper_running(folder: Path) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", guard_port(folder)), timeout=0.5):
@@ -617,6 +648,10 @@ def serve(folder: Path) -> int:
     guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     if os.name == "nt":
         guard.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        # macOS and Linux keep a closed port busy for half a minute; this lets a new helper start
+        # at once and still refuses a second one while the first listens
+        guard.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         guard.bind(("127.0.0.1", guard_port(folder)))
         guard.listen(8)
@@ -634,6 +669,8 @@ def serve(folder: Path) -> int:
     found = settings(folder)
     if not paired(found):
         return 2
+    if found.get("local"):
+        return serve_local(folder, found, guard)
     relay = Relay(found)
     seen = read_json(folder / "seen.json", [])
     seen = [item for item in seen if isinstance(item, str)] if isinstance(seen, list) else []
@@ -727,6 +764,159 @@ def serve(folder: Path) -> int:
     return 0
 
 
+class LocalServer(ThreadingHTTPServer):
+    """Listens on every address of this PC, old style and new, so `<name>.local` works whichever the phone picks."""
+
+    daemon_threads = True
+    address_family = socket.AF_INET6
+
+    def server_bind(self) -> None:
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except (AttributeError, OSError):
+            pass
+        super().server_bind()
+
+    def handle_error(self, request, client_address) -> None:
+        pass  # a phone that went to sleep in the middle of a request
+
+
+def open_local_server(port: int, handler) -> ThreadingHTTPServer:
+    try:
+        return LocalServer(("::", port), handler)
+    except OSError:  # a PC with no IPv6
+        plain = type("PlainLocalServer", (ThreadingHTTPServer,), {"daemon_threads": True, "handle_error": LocalServer.handle_error})
+        return plain(("0.0.0.0", port), handler)
+
+
+def serve_local(folder: Path, found: dict, guard: socket.socket) -> int:
+    """Local mode: this PC is the page and the relay in one, for a phone on the same Wi-Fi.
+
+    Same paths as the relay, so the phone page does not know the difference; a question is
+    answered the moment it comes, because the feed is right here.
+    """
+    key, channel, port = unb64(found["key"]), str(found["channel"]), int(found["local"])
+    seen = read_json(folder / "seen.json", [])
+    seen = [item for item in seen if isinstance(item, str)] if isinstance(seen, list) else []
+    stop = folder / "stop"
+    stop.unlink(missing_ok=True)
+    status = {"pid": os.getpid(), "started": int(time.time()), "contact": 0, "error": "", "local": port}
+    one_at_a_time = threading.Lock()
+    answers: dict[str, tuple[float, str]] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        timeout = 75  # a connection the phone left open and forgot
+
+        def log_message(self, *arguments) -> None:
+            pass
+
+        def reply(self, code: int, body: bytes | str = b"", kind: str = "text/plain", keep: str = "no-store") -> None:
+            data = body.encode("utf-8") if isinstance(body, str) else body
+            self.send_response(code)
+            self.send_header("Content-Type", kind)
+            self.send_header("Cache-Control", keep)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if code != 204 and self.command != "HEAD":
+                self.wfile.write(data)
+
+        def page(self, name: str) -> None:
+            file = PAGE_FILES.get(name)
+            if file is None:
+                return self.reply(404, "Not found.")
+            try:
+                data = (DOCS / file).read_bytes()
+            except OSError:
+                return self.reply(404, "Not found.")
+            self.reply(200, data, PAGE_TYPES[Path(file).suffix], "no-cache")
+
+        def handle_one(self, method: str) -> None:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length < 0 or length > MAX_ASK_BYTES:
+                self.close_connection = True
+                return self.reply(413, "Too large.")
+            body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+            parts = [part for part in urllib.parse.urlsplit(self.path).path.split("/") if part]
+            if not parts or parts[0] != "c":
+                if method != "GET" or len(parts) > 1:
+                    return self.reply(404, "Not found.")
+                return self.page(parts[0] if parts else "")
+            if len(parts) < 3 or not secrets.compare_digest(parts[1].encode("utf-8"), channel.encode("utf-8")):
+                return self.reply(404, "Nothing here.")
+            what, ask_id = parts[2], parts[3] if len(parts) == 4 else ""
+            if what == "state" and len(parts) == 3 and method == "GET":
+                with one_at_a_time:
+                    state = feed_answer(folder, limit=STATE_EVENTS, text_max=STATE_TEXT, bytes_max=STATE_BYTES)
+                return self.reply(200, seal(key, state))
+            if not PROMPT_ID.match(ask_id):
+                return self.reply(404, "Not found.")
+            if what == "ask" and method == "POST":
+                if not body:
+                    return self.reply(413, "Too large.")
+                with one_at_a_time:
+                    now = time.time()
+                    for old in [name for name, (made, _) in answers.items() if now - made > ANSWER_KEPT_S]:
+                        del answers[old]
+                    if len(answers) >= ANSWERS_KEPT:
+                        return self.reply(429, "Too many questions nobody came back for.")
+                    try:
+                        answer = answer_ask(folder, key, seen, body)
+                    except Exception as error:  # a broken question must not end the helper
+                        log(folder, f"{type(error).__name__}: {error}")
+                        return self.reply(500, "The PC could not answer that.")
+                    answers[ask_id] = (now, seal(key, answer))
+                    if answer.get("ok"):
+                        status["contact"] = int(now)
+                return self.reply(200, "ok")
+            if what == "answer" and method == "GET":
+                with one_at_a_time:
+                    kept = answers.pop(ask_id, None)
+                return self.reply(204) if kept is None else self.reply(200, kept[1])
+            return self.reply(404, "Not found.")
+
+        def do_GET(self) -> None:
+            self.handle_one("GET")
+
+        def do_POST(self) -> None:
+            self.handle_one("POST")
+
+    try:
+        server = open_local_server(port, Handler)
+    except OSError as error:
+        status["error"] = f"port {port} on this PC is taken ({error}): pair again with --port <another>"
+        log(folder, status["error"])
+        write_json(folder / "serve.json", status)
+        guard.close()
+        return 1
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log(folder, f"helper {VERSION} started in local mode on port {port}, pid {os.getpid()}")
+    written = None
+    try:
+        while not stop.exists():
+            now = time.time()
+            idle = now - max(last_active(folder), status["started"])
+            if idle > (IDLE_ON_S if mode(folder)["on"] else IDLE_OFF_S) and not listening(folder):
+                log(folder, "nobody needs the helper any more")
+                break
+            if written != status["contact"] // 5:
+                written = status["contact"] // 5
+                write_json(folder / "serve.json", status)
+            time.sleep(0.3)
+    finally:
+        server.shutdown()
+        server.server_close()
+        stop.unlink(missing_ok=True)
+        guard.close()
+        log(folder, "helper stopped")
+    return 0
+
+
 # ---------------------------------------------------------------- commands
 ME = "vector_relay.py"
 SEVERAL = "Several chats are in phone mode. Say which one with --chat <id>:"
@@ -738,9 +928,19 @@ def say_chats(folder: Path) -> None:
             print(f"  {chat}  {entry['label'] or '(no name)'}")
 
 
-def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_picture: bool) -> int:
+def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_picture: bool,
+                 local: bool = False, port: int = LOCAL_PORT, host: str = "") -> int:
     found = settings(folder)
-    if relay:
+    if local:
+        address = f"http://{host or local_name()}:{port}"
+        if not RELAY_ADDRESS.match(address) or not 1024 <= port <= 65535:
+            print("Local mode needs a name ending in .local or a private address (192.168.x.x, 10.x.x.x), and a port above 1023.")
+            return 2
+        if not found.get("local"):  # the key that went through a relay's address is not used here
+            for name in ("channel", "key", "write"):
+                found.pop(name, None)
+        found.update(relay=address, page=address + "/", local=port)
+    elif relay:
         relay = relay.rstrip("/")
         if not RELAY_ADDRESS.match(relay):
             print("The relay address must look like https://<name>.pages.dev")
@@ -748,6 +948,7 @@ def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_pict
         if relay != found.get("relay"):
             found.pop("page", None)
         found["relay"] = relay
+        found.pop("local", None)
     found.setdefault("relay", RELAY)
     if page:
         found["page"] = page
@@ -765,8 +966,14 @@ def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_pict
         print("Scan it with the phone's camera. It holds the key: do not share the picture.")
         if open_picture and hasattr(os, "startfile"):
             os.startfile(picture)  # noqa: S606 - the user's own picture viewer
+        elif open_picture and sys.platform == "darwin":
+            subprocess.run(["open", str(picture)], check=False)
     except ImportError:
         print("No QR picture (pip install segno). Use --show-link and open the link on the phone.")
+    if found.get("local"):
+        print(f"Local mode: the phone must be on the same Wi-Fi as this PC, which serves the page on port {found['local']}.")
+        if helper_running(folder):
+            print(f"The helper still runs with the old settings. Run:  {ME} stop")
     if show_link:
         print(link)
     return 0
@@ -924,7 +1131,10 @@ def command_status(folder: Path) -> int:
     if not paired(found):
         print(f"Not linked to a phone yet. Run:  {ME} pair --open")
         return 0
-    print(f"Relay:      {urllib.parse.urlsplit(found['relay']).netloc}")
+    if found.get("local"):
+        print("Mode:       local, no relay: the phone must be on this PC's Wi-Fi")
+    else:
+        print(f"Relay:      {urllib.parse.urlsplit(found['relay']).netloc}")
     print(f"Phone page: {found.get('page', found['relay'] + '/')}")
     on = chats_on(folder)
     print(f"Phone mode: {'on in ' + str(len(on)) + ' chat(s)' if on else 'off'}")
@@ -934,7 +1144,10 @@ def command_status(folder: Path) -> int:
             print(f"  {chat}  {entry['label'] or '(no name)'}: {state}, {len(waiting_ids(folder, chat))} prompt(s) waiting")
     print(f"Helper:     {'running' if running else 'not running'}")
     if running and helper.get("contact"):
-        print(f"Relay last reached: {time.strftime('%H:%M:%S', time.localtime(helper['contact']))}")
+        what = "Phone last asked:" if found.get("local") else "Relay last reached:"
+        print(f"{what} {time.strftime('%H:%M:%S', time.localtime(helper['contact']))}")
+    elif running and found.get("local"):
+        print("Phone last asked: not yet")
     if running and helper.get("error"):
         print(f"Trouble:    {helper['error']}")
     print(f"Feed:       {len(events)} events")
@@ -956,7 +1169,9 @@ def command_forget(folder: Path) -> int:
     """Unlinks every phone: wipes this channel at the relay, the key, the feed and the pictures. The relay address stays."""
     found = settings(folder)
     command_stop(folder)
-    if paired(found):
+    if paired(found) and found.get("local"):
+        print("The old key is gone: the phone that had it is no longer linked.")
+    elif paired(found):
         relay = Relay(found)
         try:
             code, _ = relay.call("DELETE", "", owner=True)
@@ -964,7 +1179,7 @@ def command_forget(folder: Path) -> int:
         except OSError as error:
             print(f"Could not reach the relay ({error}); the old key is gone here anyway.")
         relay.close()
-    kept = {name: found[name] for name in ("relay", "page") if found.get(name)}
+    kept = {name: found[name] for name in ("relay", "page", "local") if found.get(name)}
     write_json(folder / "settings.json", kept)
     for name in ("feed.jsonl", "seen.json", "chats.json", "pair.png", "serve.json", "active"):
         (folder / name).unlink(missing_ok=True)
@@ -983,6 +1198,9 @@ def main(arguments: list[str] | None = None) -> int:
     pair = commands.add_parser("pair", help="make the QR code that links a phone")
     pair.add_argument("--relay", default="", help="address of your own relay, if you run one")
     pair.add_argument("--page", default="", help="address of the phone page, if it is not at the relay")
+    pair.add_argument("--local", action="store_true", help="no relay: this PC serves the page, for a phone on the same Wi-Fi")
+    pair.add_argument("--port", type=int, default=LOCAL_PORT, help=f"local mode: the port to serve on (default {LOCAL_PORT})")
+    pair.add_argument("--host", default="", help="local mode: this PC's name or address as the phone reaches it (default <its name>.local)")
     pair.add_argument("--show-link", action="store_true", help="print the link (it holds the key)")
     pair.add_argument("--open", action="store_true", help="open the QR picture")
     on = commands.add_parser("on", help="phone mode on for a chat; prints its chat id")
@@ -1007,7 +1225,8 @@ def main(arguments: list[str] | None = None) -> int:
     chosen = parser.parse_args(arguments)
     folder = home()
     if chosen.command == "pair":
-        return command_pair(folder, chosen.relay, chosen.page, chosen.show_link, chosen.open)
+        return command_pair(folder, chosen.relay, chosen.page, chosen.show_link, chosen.open,
+                            chosen.local, chosen.port, chosen.host)
     if chosen.command == "on":
         return command_on(folder, chosen.label, chosen.chat)
     if chosen.command == "off":
