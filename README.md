@@ -37,7 +37,10 @@ tools it already has:
 
 The skill in `skill/phone-relay/SKILL.md` teaches a chat this loop: type `/phone` in the chat.
 
-Other commands: `pair`, `off`, `status`, `stop`, `forget`.
+Other commands: `pair` links a phone (QR code, or `--code` for 4 digits), `off` takes a chat out of
+phone mode, `status` says what is linked and running, `stop` stops the background helper (the next
+`on` starts it again), `forget` unlinks every phone and clears the feed.
+`pair --local` uses no relay at all: the PC itself serves the page to a phone on the same Wi-Fi.
 
 The page and the relay live at one address, [vector-relay.pages.dev](https://vector-relay.pages.dev):
 a Cloudflare Pages project with one Pages Function (`functions/`) and one D1 database
@@ -53,13 +56,41 @@ a Cloudflare Pages project with one Pages Function (`functions/`) and one D1 dat
 3. On the iPhone: Share, then **Add to Home Screen**.
 4. In a chat on the PC, type `/phone` (with the skill installed), and leave.
 
-**A second computer, or no camera at hand: 4 digits instead of the QR code.** On that computer
-type `/phone code` in a chat (or run `python vector_relay.py pair --code`). It shows 4 digits.
-On the phone: **Device**, **+ Add device**, a name, the 4 digits. A code links one phone, works
-for 5 minutes and dies after 3 wrong answers. One phone page then holds every computer you
-added; choose the computer under **Device** first, then the chat.
+### A second computer, or no camera at hand: 4 digits instead of the QR code
 
-![The 4 digits on the phone](shots/phone-code.png)
+1. On that computer, Windows or Mac. Nothing to deploy, nothing to copy from the first computer:
+
+       git clone https://github.com/juw12/vector-relay
+       python -m pip install cryptography segno pillow        (on a Mac: python3 -m pip ...)
+
+   Copy `skill/phone-relay/SKILL.md` into the chat app's skills folder and change its two lines
+   that hold the path of `vector_relay.py` to where the clone is on that computer.
+2. There, type `/phone code` in a chat (or run `python vector_relay.py pair --code`). It prints
+   `Code for the phone: 1234` and one line that says where to type it. Nothing else.
+3. On the phone: **Device**, **+ Add device**, a name for that computer, the 4 digits.
+4. The phone switches to the new computer and names it: *No chat on MacBook is in phone mode. On
+   that computer, type /phone in a chat.* Do that, and the chat shows up.
+
+What the phone says when a code does not work:
+
+- Wrong digits, tries left: *That is not the code. Check the 4 digits on the computer and try again.*
+- Third wrong answer: *That is not the code, and it has stopped working now. Make a new code on the computer.*
+- No code is waiting (it ran out, or was taken back): *No computer is showing a code right now. On
+  that computer, type /phone code in a chat, then enter its 4 digits here.*
+- The computer stopped answering part way: *The computer did not answer. Make a new code on it and
+  try again.*
+
+A code links one phone, works for 5 minutes and dies after 3 wrong answers. `pair --no-code`
+takes it back before that. Two computers can be added one right after the other: the second
+waits up to 20 seconds for its turn. One phone page then holds every computer you added, each
+with its own key. Choose the computer under **Device** first, then the chat; the line above the
+prompt box always says where a prompt goes (*To: MacBook*), and it goes to that computer only.
+**Rename** under **Device** changes the name the phone shows for the chosen computer; nothing
+changes on the computer.
+
+| The 4 digits on the phone | Right after the computer is added |
+|---|---|
+| ![The 4 digits on the phone](shots/phone-code.png) | ![The phone names the new computer and says the next step](shots/phone-added.png) |
 
 To run your own relay instead of the public one: the four commands at the top of `wrangler.toml`,
 then `pair --relay https://<your-project>.pages.dev`. A relay sees ciphertext only, so sharing one
@@ -108,16 +139,33 @@ the last chat leaves phone mode.
 
 ## Tests
 
-    python -m unittest discover -s tests   57 tests: seal, feed, inbox, chats, pictures, commands, whole trips,
+    python -m unittest discover -s tests   60 tests: seal, feed, inbox, chats, pictures, commands, whole trips,
                                            local mode, the 4-digit code
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
-                                           (as a Pixel 7), relay rules in memory: 64 steps
-    python scripts/e2e.py --live           the same steps on the deployed page and relay, on a
-                                           throwaway channel that is wiped at the end
+                                           (as a Pixel 7), relay rules in memory: 67 steps
+    python scripts/e2e.py --live           the deployed page and relay, on throwaway channels that
+                                           are wiped at the end: 64 steps. The 8 local Wi-Fi steps
+                                           are left out (they use no relay), and 5 are added: a
+                                           phone with no computer yet adds its first one by code,
+                                           and the channel is wiped
 
 `scripts/e2e.py` needs `pip install playwright` and `playwright install webkit chromium`.
 
-Not yet checked: a real iPhone. WebKit on Windows is the closest stand-in.
+Not yet checked: a real iPhone (WebKit on Windows is the closest stand-in), and a Mac as the
+second computer on the public relay (the Mac build was checked on a relay of its own).
+
+## Versions
+
+- **1.2.1** `pair --code` prints the code alone, with no QR lines to read past. `pair --no-code`
+  takes a code back. A second computer gets its code right after the first one was used (it was
+  refused for 15 seconds before). Right after it is added, the phone names the new computer and
+  says the next step, where it showed an error until a chat was in phone mode. A computer whose
+  chats all left phone mode shows the same calm line instead of *Your PC does not answer*.
+- **1.2.0** Add a computer on the phone with a 4-digit code.
+- **1.1.0** Several computers on one phone page (the device picker), and a local Wi-Fi mode
+  that needs no relay.
+- **1.0.0** A relay and an address of its own, several chats at once, pictures both ways,
+  waiting all day.
 
 ## Files
 

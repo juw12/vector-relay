@@ -277,6 +277,8 @@ def code_trip(page, expect, root: Path, relay_address: str, base: str, hosts: li
     """A third computer joins with the 4 digits it shows: no QR code, no link to paste."""
     desk = root / 'desk'
     desk.mkdir()
+    while relay.helper_running(desk):  # another folder's helper holds the port this folder would use
+        desk = Path(tempfile.mkdtemp(dir=root))
     hosts.append(desk)
     assert run(desk, 'pair', '--relay', relay_address, '--page', base).returncode == 0
     assert run(desk, 'on', '--label', 'Desk chat').returncode == 0
@@ -323,6 +325,34 @@ def code_trip(page, expect, root: Path, relay_address: str, base: str, hosts: li
     page.wait_for_timeout(300)
     page.screenshot(path=str(REPO / 'shots' / 'phone-code.png'))
     page.locator('#cancelDevice').tap()
+
+    # A fourth computer, added straight after the third, with no chat in phone mode yet.
+    spare = root / 'spare'
+    spare.mkdir()
+    while relay.helper_running(spare):
+        spare = Path(tempfile.mkdtemp(dir=root))
+    hosts.append(spare)
+    assert run(spare, 'pair', '--relay', relay_address, '--page', base).returncode == 0
+    made = run(spare, 'pair', '--code')  # the room of the code used a moment ago is still kept: this waits for it
+    code = made.stdout.split('Code for the phone: ')[1][:4] if 'Code for the phone: ' in made.stdout else ''
+    check(made.returncode == 0 and code.isdigit() and 'QR code' not in made.stdout,
+          'code: the next computer gets its code right after the last one was used, and prints the code alone')
+    page.locator('#addDevice').tap()
+    page.locator('#deviceName').fill('Spare PC')
+    page.locator('#deviceCode').fill(code)
+    page.locator('#saveDevice').tap()
+    expect(page.locator('#sendTarget')).to_have_text('To: Spare PC', timeout=30_000)
+    expect(page.locator('#status')).to_contain_text('No chat on Spare PC is in phone mode. On that computer, type /phone in a chat.', timeout=45_000)
+    check('bad' not in (page.locator('#dot').get_attribute('class') or ''),
+          'code: a computer with no chat in phone mode yet is named on the phone with the next step, and no error')
+    page.screenshot(path=str(REPO / 'shots' / 'phone-added.png'))
+    assert run(spare, 'on', '--label', 'Spare chat').returncode == 0
+    expect(page.locator('#status')).to_contain_text('Vector is', timeout=45_000)
+    assert run(spare, 'off').returncode == 0
+    expect(page.locator('#status')).to_contain_text(
+        'This chat left phone mode. No chat on Spare PC is in phone mode now: on that computer, type /phone in a chat.', timeout=45_000)
+    check('bad' not in (page.locator('#dot').get_attribute('class') or ''),
+          'code: when its last chat leaves phone mode, the phone still names the computer and the next step')
 
 
 def first_by_code(webkit, iphone, expect, folder: Path, page_address: str, slow: int) -> None:

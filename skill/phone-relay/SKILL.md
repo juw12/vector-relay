@@ -11,6 +11,9 @@ chat app itself. His phone needs the internet only, not the office Wi-Fi.
 
     RELAY = python E:\Projects\vector-relay\vector_relay.py
 
+(On another computer, put its own path here and in the waiting snippet below. On a Mac:
+`python3 ~/vector-relay/vector_relay.py`.)
+
 ## Start
 
 1. `RELAY status`
@@ -30,19 +33,20 @@ chat app itself. His phone needs the internet only, not the office Wi-Fi.
 When he types `/phone code`, or asks in this chat to add or link this computer on his phone:
 
 1. `RELAY pair --code`
-   It prints `Code for the phone: 1234`.
+   It prints `Code for the phone: 1234` and one line of steps for the phone, nothing else.
 2. Put the 4 digits in your reply, with the steps for the phone: open Vector Relay, **Device**,
    **+ Add device**, a name for this computer, the 4 digits. The code links one phone, works for
    5 minutes and dies after 3 wrong answers.
 3. When he says it is done, `RELAY status`. Its `Code:` line says what became of the code
    ("a phone was linked with it", "it ran out", "answered wrong 3 times"). Make a new code only
-   when he asks for one.
-4. A computer that was just added shows "The relay has nothing for this phone yet" on the phone
-   until one of its chats is in phone mode. Turn it on for this chat (Start, step 2) if he wants
-   to use it now.
+   when he asks for one. He changed his mind before using it: `RELAY pair --no-code` takes it back.
+4. A computer that was just added shows on the phone under the name he gave it, with "No chat on
+   <that name> is in phone mode. On that computer, type /phone in a chat." Turn phone mode on for
+   this chat (Start, step 2) if he wants to use it now.
 
 - `No code: another computer is showing a code`: only one computer at a time can show a code on
-  a relay. Wait until that one is used or 5 minutes old, then try again.
+  a relay, and the command already waited 20 seconds for its turn. Wait until the other code is
+  used or 5 minutes old, then try again.
 - `No code: cannot reach the relay`, or the phone page has no code field yet: `RELAY pair --open`
   and he scans the QR code.
 - The 4 digits are the only pairing output that may appear in the chat. The link, the QR
