@@ -37,7 +37,10 @@ tools it already has:
 
 The skill in `skill/phone-relay/SKILL.md` teaches a chat this loop: type `/phone` in the chat.
 
-Other commands: `pair`, `off`, `status`, `stop`, `forget`.
+Other commands: `pair` links a phone (QR code, or `--code` for 4 digits), `off` takes a chat out of
+phone mode, `status` says what is linked and running, `stop` stops the background helper (the next
+`on` starts it again), `forget` unlinks every phone and clears the feed.
+`pair --local` uses no relay at all: the PC itself serves the page to a phone on the same Wi-Fi.
 
 The page and the relay live at one address, [vector-relay.pages.dev](https://vector-relay.pages.dev):
 a Cloudflare Pages project with one Pages Function (`functions/`) and one D1 database
@@ -68,11 +71,22 @@ a Cloudflare Pages project with one Pages Function (`functions/`) and one D1 dat
 4. The phone switches to the new computer and names it: *No chat on MacBook is in phone mode. On
    that computer, type /phone in a chat.* Do that, and the chat shows up.
 
+What the phone says when a code does not work:
+
+- Wrong digits, tries left: *That is not the code. Check the 4 digits on the computer and try again.*
+- Third wrong answer: *That is not the code, and it has stopped working now. Make a new code on the computer.*
+- No code is waiting (it ran out, or was taken back): *No computer is showing a code right now. On
+  that computer, type /phone code in a chat, then enter its 4 digits here.*
+- The computer stopped answering part way: *The computer did not answer. Make a new code on it and
+  try again.*
+
 A code links one phone, works for 5 minutes and dies after 3 wrong answers. `pair --no-code`
 takes it back before that. Two computers can be added one right after the other: the second
 waits up to 20 seconds for its turn. One phone page then holds every computer you added, each
 with its own key. Choose the computer under **Device** first, then the chat; the line above the
 prompt box always says where a prompt goes (*To: MacBook*), and it goes to that computer only.
+**Rename** under **Device** changes the name the phone shows for the chosen computer; nothing
+changes on the computer.
 
 | The 4 digits on the phone | Right after the computer is added |
 |---|---|

@@ -66,3 +66,95 @@ stop: done. All six gates pass and the council score is 9.55, above DONE_SCORE 8
 ## Also learned
 
 - A 12-hour `listen` in one tool call returned `NONE` on time: the wait itself holds for 12 hours without the chat taking a turn. (That run was the one that showed the helper problem fixed in round 3.)
+
+---
+
+# Run of 2026-11-20 (/hone, Loop mode)
+
+Maker: Claude in Vector. Judge: council (Pega-Vision, Pega-Thinking, GLM-5.3-Flash). Ask: "push it and /hone too",
+right after 1.2.0 (a computer is added by typing 4 digits) was deployed.
+
+## Run queue
+
+- [x] Push 1.2.0: branch `pair-code`, PR #1 merged to `main` (`4f46344`), tag `v1.2.0`
+- [x] Rubric vr-2, frozen before scoring
+- [x] Baseline score of 1.2.0
+- [x] Round 1: version 1.2.1
+- [x] Gates G1-G6 on the new version
+- [x] Council score and side-by-side vote
+- [x] Ship: PR, merge, tag `v1.2.1`, deployed page, installed copy and skill on this PC
+- [x] Sync: profile README, portfolio card, landing page, Obsidian note and log
+
+## Assumptions
+
+- Assumed: "push it" means the 1.2.0 work goes to the public repo as a pull request, merged, with a tag.
+- Assumed: /hone means the improve loop on this app. A new rubric (vr-2) was written because vr-1 was already at
+  9.55 and the goal has moved: two laptops on one phone, and 4 digits instead of a long link.
+- Assumed: the working copy for this run is a fresh clone on drive C, on its own branch (`agent/hone-1120`).
+- Assumed: the result is version 1.2.1 (fixes and wording, nothing new to learn).
+
+## Rubric vr-2 (frozen before scoring)
+
+Hard gates:
+
+| Gate | Check | Result on 1.2.1 |
+|---|---|---|
+| G1 | Unit tests all pass | 60 of 60 |
+| G2 | Phone page end to end against the in-memory relay (WebKit as iPhone 14, Chromium as Pixel 7) | 67 of 67 steps |
+| G3 | The same steps against the deployed page and relay, after the deploy | 64 of 64 steps |
+| G4 | Nothing private in the repo: no key, no settings, no private addresses or personal folders, no old names | `git grep` finds none |
+| G5 | The copy installed on this PC is the version in the repo, and its skill is the repo's skill | `status` says 1.2.1; page files and skill copied from the repo |
+| G6 | A real pairing on this PC is added by its 4 digits on the deployed page (WebKit as iPhone), and the phone then names the computer and says what to do next without an error | 5 of 5: added in 5.1 s; 21 s after the tap the phone named the laptop and the next step |
+
+Soft criteria (0-10):
+
+- C1 Adding a computer (w=0.30): 4 = a long link must be pasted or the steps are easy to get wrong; 7 = 4 digits
+  work, with rough spots (extra output to read past, no way to take a code back, a confusing message right after
+  linking, vague errors); 10 = one phrase in a chat shows 4 digits and nothing else to read, the phone asks only
+  for a name and the digits, right after linking the phone names the computer and says the next step in plain
+  words, a wrong or dead code is explained, a code can be taken back, and the link and QR ways still work.
+- C2 Two laptops on one phone (w=0.25): 4 = one computer per page, or he must keep two pages; 7 = a picker holds
+  several computers but it is unclear which one a prompt goes to, or a second laptop's setup is not written down;
+  10 = one page holds every computer, the page always says which computer a prompt goes to, a prompt reaches that
+  computer and no other, rename works, and the steps to join a second laptop (any OS) are written so he can do it
+  in two minutes.
+- C3 Safety of the code (w=0.25): 4 = the 4 digits act as a password that the relay or a stranger can try many
+  times; 7 = tries and time are limited but the relay could learn the key, or what a stranger can still do is not
+  said; 10 = the key never travels and the relay cannot learn it from what it carries, tries and time are limited
+  by the computer itself, a used or dead code opens nothing, the agent is told what it must never print, and the
+  risk that is left is given as a number.
+- C4 Honest, current docs (w=0.20): 4 = the README is behind the code or hides limits; 7 = current, but a limit,
+  an unchecked item or a version change is vague; 10 = every command, limit and unchecked item is stated plainly
+  with its reason, the versions and what changed are listed, and the numbers in the README match the checks.
+
+Constants: MAX_ROUNDS 5, MIN_GAIN 0.3, DONE_SCORE 8.5.
+
+## Rounds
+
+| round | change | gates | judge score | pairwise win | kept? | note |
+|---|---|---|---|---|---|---|
+| v0 | 1.2.0 as pushed | G1-G3 pass (57 unit, 64 local, 61 live) | 8.0 (C1 7, C2 8, C3 10, C4 7) | - | baseline | council-judged (3 judges), totals 8.0-8.5, no split criterion |
+| 1 | 1.2.1: `pair --code` prints the code and one line, nothing else; `pair --no-code` takes a code back; a second computer waits up to 20 s for its turn instead of being refused; the phone names a newly added computer and the next step instead of a red error; README: numbered second-laptop steps for any system, a picture of the phone right after adding, a list of versions | G1-G6 pass | 9.45 (C1 9, C2 9, C3 10, C4 10) | 3-0 over v0 | yes | council-judged (3 judges), totals 9.25-9.5, no split criterion |
+| 2 | README now says things the app already did but the README left out, each found by a judge: what **Rename** does, what each other command does, what `pair --local` is, and the sentences the phone shows when a code is wrong, has run out or gets no answer | text only | not scored again | - | yes | - |
+
+Found by the checks, and fixed inside round 1:
+
+- G6 on the real laptop showed a line the simulated steps had missed. The laptop had old chats that left phone mode
+  earlier in the day, so the phone said "This chat left phone mode. On the PC, type /phone in a chat." with no
+  computer name. It now says "This chat left phone mode. No chat on ASUS laptop is in phone mode now: on that
+  computer, type /phone in a chat." A step for this was added to the end-to-end run.
+- One local end-to-end run failed for a reason outside the app: two test folders drew the same guard port for
+  their helpers. The run now draws again when two folders collide.
+
+Judge fixes not taken, and why:
+
+- Remove the one line under the code: it says where on the phone to type the digits; without it a first-time user
+  has a number and no place to put it.
+- No manual skill edit on a second laptop: the skill must hold the path of `vector_relay.py` on that computer, and
+  that path is the user's choice. Two lines to change, written in the README.
+- Time the second-laptop steps: needs the second laptop itself; listed under "not yet checked".
+
+stop: done. All six gates pass and the council score is 9.45, above DONE_SCORE 8.5.
+
+Not checked: a real iPhone (WebKit on Windows stands in for it). The MacBook has not joined
+vector-relay.pages.dev yet.
