@@ -133,7 +133,9 @@ def local_trip(playwright, expect) -> None:
         found = relay.settings(folder)
         address = found["page"] + "#r=" + relay.ticket(found)
         chat = run(folder, "on", "--label", "Local chat").stdout.split("chat=")[1][:4]
-        webkit = playwright.webkit.launch()
+        # an office PC sends everything but its own name through a proxy, which does not know the way back to this PC
+        straight = {**os.environ, "NO_PROXY": ",".join(filter(None, [os.environ.get("NO_PROXY", ""), host]))}
+        webkit = playwright.webkit.launch(env=straight)
         context = webkit.new_context(**playwright.devices["iPhone 14"])
         page = context.new_page()
         errors: list[str] = []
@@ -186,16 +188,19 @@ def local_trip(playwright, expect) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def device_trip(playwright, expect) -> None:
-    """Two independent pairings, even with identical chat IDs and labels."""
+def device_trip(playwright, expect, relay_address: str = "", page_address: str = "") -> None:
+    """Two independent pairings, even with identical chat IDs and labels. Through a deployed relay when one is named."""
     scratch = REPO / '.tmp'
     scratch.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+    with tempfile.TemporaryDirectory(dir=scratch, ignore_cleanup_errors=True) as temporary:  # a code's waiter may still sit in its folder
         root = Path(temporary)
-        fake = FakeRelay()
+        fake = None if relay_address else FakeRelay()
+        relay_address = relay_address or fake.address
         site = ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Quiet, directory=str(REPO / 'docs')))
         threading.Thread(target=site.serve_forever, daemon=True).start()
-        base = f'http://127.0.0.1:{site.server_port}/'
+        base = page_address or f'http://127.0.0.1:{site.server_port}/'
+        if fake is None:
+            expect.set_options(timeout=25_000)  # a deployed relay answers slower than the one in memory
         hosts = []
         browser = None
         try:
@@ -205,7 +210,7 @@ def device_trip(playwright, expect) -> None:
                 while relay.helper_running(host):
                     host = Path(tempfile.mkdtemp(dir=root))
                 hosts.append(host)
-                assert run(host, 'pair', '--relay', fake.address, '--page', base).returncode == 0
+                assert run(host, 'pair', '--relay', relay_address, '--page', base).returncode == 0
                 relay.write_json(host / 'chats.json', {'abcd': {'label': 'Identical chat', 'on': False, 'since': int(time.time())}})
                 assert run(host, 'on', '--chat', 'abcd', '--label', 'Identical chat').returncode == 0
                 assert run(host, 'say', '--chat', 'abcd', '--kind', 'result', name + ' feed').returncode == 0
@@ -223,6 +228,9 @@ def device_trip(playwright, expect) -> None:
             page.locator('#saveDevice').tap()
             expect(page.locator('#sendTarget')).to_have_text('To: MacBook')
             page.locator('#addDevice').tap()
+            expect(page.locator('#deviceCode')).to_be_visible()
+            check(page.locator('#deviceLink').is_hidden(), 'devices: Add device asks for the 4-digit code first, the link is the other way')
+            page.locator('#useLink').tap()
             page.locator('#deviceName').fill('ASUS laptop')
             page.locator('#deviceLink').fill(base)
             page.locator('#saveDevice').tap()
@@ -253,14 +261,90 @@ def device_trip(playwright, expect) -> None:
             assert not relay.waiting_ids(asus)
             assert relay.take_prompt(mac, 'abcd')['text'] == 'Mac only'
             check(True, 'devices: switching back restores the Mac feed and sends only to the Mac')
+            code_trip(page, expect, root, relay_address, base, hosts)
         finally:
             if browser is not None:
                 browser.close()
             for host in hosts:
-                run(host, 'stop')
-            fake.close()
+                run(host, 'stop' if fake else 'forget')  # `forget` wipes a throwaway channel at a deployed relay
+            if fake is not None:
+                fake.close()
             site.shutdown()
             site.server_close()
+
+
+def code_trip(page, expect, root: Path, relay_address: str, base: str, hosts: list) -> None:
+    """A third computer joins with the 4 digits it shows: no QR code, no link to paste."""
+    desk = root / 'desk'
+    desk.mkdir()
+    hosts.append(desk)
+    assert run(desk, 'pair', '--relay', relay_address, '--page', base).returncode == 0
+    assert run(desk, 'on', '--label', 'Desk chat').returncode == 0
+    assert run(desk, 'say', '--kind', 'result', 'desk feed').returncode == 0
+    page.locator('#menu').tap()
+    page.locator('#addDevice').tap()
+    page.locator('#deviceName').fill('Desk PC')
+    page.locator('#deviceCode').fill('12')
+    page.locator('#saveDevice').tap()
+    expect(page.locator('#deviceError')).to_contain_text('Type the 4 digits')
+    page.locator('#deviceCode').fill('1234')
+    page.locator('#saveDevice').tap()
+    expect(page.locator('#deviceError')).to_contain_text('No computer is showing a code', timeout=20_000)
+    check(True, 'code: with no code showing anywhere, the phone says so')
+
+    made = run(desk, 'pair', '--code')
+    code = made.stdout.split('Code for the phone: ')[1][:4]
+    check(made.returncode == 0 and code.isdigit() and '#r=' not in made.stdout, 'code: `pair --code` shows 4 digits and no link')
+    page.locator('#deviceCode').fill(f'{(int(code) + 1) % 10_000:04d}')
+    page.locator('#saveDevice').tap()
+    expect(page.locator('#deviceError')).to_contain_text('That is not the code. Check the 4 digits', timeout=30_000)
+    check(len(relay.settings(desk)['key']) == 43 and page.locator('#sendTarget').inner_text() == 'To: MacBook',
+          'code: a wrong code brings nothing, and says so')
+    page.locator('#deviceCode').fill(code)
+    sent = time.time()
+    page.locator('#saveDevice').tap()
+    expect(page.locator('#sendTarget')).to_have_text('To: Desk PC', timeout=30_000)
+    took = time.time() - sent
+    expect(page.locator('.item.result .text')).to_have_text('desk feed')
+    check(True, f'code: the right 4 digits add the computer and open its sealed feed ({took:.1f} s)')
+    check('a phone was linked with it' in run(desk, 'status').stdout, 'code: the computer knows a phone was linked with the code')
+    page.locator('#box').fill('Desk only')
+    page.locator('#send').tap()
+    expect(page.locator('.item.prompt .meta')).to_contain_text('waiting for the chat')
+    listening = [chat for chat in relay.chats(desk) if relay.chats(desk)[chat]['on']]
+    assert relay.take_prompt(desk, listening[0])['text'] == 'Desk only'
+    assert not relay.waiting_ids(hosts[0]) and not relay.waiting_ids(hosts[1])
+    check(True, 'code: a prompt to the computer added by code arrives there and nowhere else')
+    page.locator('#menu').tap()
+    check(page.locator('#devicePicker option').count() == 3, 'code: the picker lists all three computers')
+    page.wait_for_timeout(500)  # the chat list has slid in by then
+    page.screenshot(path=str(REPO / 'shots' / 'phone-devices.png'))
+    page.locator('#addDevice').tap()
+    page.wait_for_timeout(300)
+    page.screenshot(path=str(REPO / 'shots' / 'phone-code.png'))
+    page.locator('#cancelDevice').tap()
+
+
+def first_by_code(webkit, iphone, expect, folder: Path, page_address: str, slow: int) -> None:
+    """A phone that has no computer yet adds its first one with the 4 digits (page and relay at one address)."""
+    made = run(folder, "pair", "--code")
+    code = made.stdout.split("Code for the phone: ")[1][:4] if "Code for the phone: " in made.stdout else ""
+    check(made.returncode == 0 and code.isdigit(), "code: `pair --code` gets a room at the relay and shows 4 digits")
+    context = webkit.new_context(**iphone)
+    page = context.new_page()
+    try:
+        page.goto(page_address)
+        page.locator("#firstDevice").tap()
+        page.locator("#deviceName").fill("Test PC")
+        page.locator("#deviceCode").fill(code)
+        sent = time.time()
+        page.locator("#saveDevice").tap()
+        expect(page.locator(".item.note .text")).to_have_text("Phone mode on: Atlas FA", timeout=slow * 2)
+        check(True, f"code: a phone with no computer yet adds its first one with the 4 digits ({time.time() - sent:.1f} s)")
+        check(page.locator("#sendTarget").inner_text() == "To: Test PC", "code: the computer has the name typed on the phone")
+    finally:
+        context.close()
+    check("a phone was linked with it" in run(folder, "status").stdout, "code: the computer knows a phone was linked with the code")
 
 
 def main() -> int:
@@ -310,6 +394,8 @@ def main() -> int:
             expect(page.locator("#none")).to_be_visible()
             check(page.locator("#composer").is_hidden(), "a phone with no code sees how to link, and no prompt box")
             context.close()
+            if chosen.relay and page_address.rstrip("/") == chosen.relay.rstrip("/"):
+                first_by_code(webkit, iphone, expect, folder, page_address, slow)
 
             # ---- linked
             context = webkit.new_context(**iphone)
@@ -525,7 +611,7 @@ def main() -> int:
             check(not errors, "no errors on the page" + (": " + "; ".join(errors[:3]) if errors else ""))
             if not chosen.relay:
                 local_trip(playwright, expect)
-                device_trip(playwright, expect)
+            device_trip(playwright, expect, chosen.relay, chosen.page)
     finally:
         forgot = run(folder, "forget")
         if chosen.relay:

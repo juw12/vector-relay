@@ -3,6 +3,7 @@
    Everything travels as AES-GCM ciphertext through a relay that cannot read it. The key came from
    the QR code on the PC, after the # of this page's address, which a browser sends to no server.
    In local mode the PC itself is the relay and serves this page, for a phone on the same Wi-Fi.
+   A second computer can be added with a 4-digit code it shows, instead of its QR code.
 
    The phone asks the PC a question (route "feed", "prompt", "event" or "image") by leaving it at
    the relay and waiting there for the answer. When the PC does not answer, the last sealed copy
@@ -687,6 +688,131 @@
     $("photo").value = "";
   }
 
+  // ------------------------------------------------------------ a 4-digit code instead of the QR code
+  /* The computer shows 4 digits. It and this phone each turn them into a number, raise it to a
+     secret of their own and swap the results (SPEKE, in the 2048-bit group of RFC 3526). Only two
+     sides that started from the same digits end with the same key, and what crosses the relay says
+     nothing about the digits: a guess has to be sent to the computer, which takes three. The
+     pairing link then arrives sealed with the key the two just made.
+     The swap happens in a "room": a channel of the relay named by the time alone. */
+  var CODE_PRIME =
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DD" +
+    "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED" +
+    "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F" +
+    "83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B" +
+    "E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA0510" +
+    "15728E5A8AACAA68FFFFFFFFFFFFFFFF";
+  var ROOM_EVERY_MS = 5 * 60 * 1000, ROOM_HANG_MS = 6000, CODE_WAIT_MS = 25000;
+  var canCode = !!subtle && typeof BigInt === "function";   // not on a page that came over plain http from the PC
+
+  function bytesOf(text) { return new TextEncoder().encode(text); }
+  function joined(parts) {
+    var all = new Uint8Array(parts.reduce(function (sum, part) { return sum + part.length; }, 0)), at = 0;
+    parts.forEach(function (part) { all.set(part, at); at += part.length; });
+    return all;
+  }
+  function digest(bytes) {
+    return subtle.digest("SHA-256", bytes).then(function (made) { return new Uint8Array(made); });
+  }
+  function signed(key, text) {
+    return subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+      .then(function (made) { return subtle.sign("HMAC", made, bytesOf(text)); })
+      .then(function (made) { return new Uint8Array(made); });
+  }
+  function numberOf(bytes) {
+    var hex = "0";
+    for (var i = 0; i < bytes.length; i += 1) hex += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+    return BigInt("0x" + hex);
+  }
+  function wide(number) {   // 256 bytes, the highest first
+    var hex = number.toString(16), bytes = new Uint8Array(256);
+    hex = new Array(513 - hex.length).join("0") + hex;
+    for (var i = 0; i < 256; i += 1) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return bytes;
+  }
+  function power(base, exponent, modulus) {
+    var result = BigInt(1), none = BigInt(0), one = BigInt(1);
+    base %= modulus;
+    while (exponent > none) {
+      if (exponent & one) result = result * base % modulus;
+      base = base * base % modulus;
+      exponent >>= one;
+    }
+    return result;
+  }
+  async function codeBase(code, prime) {
+    var parts = [];
+    for (var count = 0; count < 10; count += 1) {
+      parts.push(await digest(joined([bytesOf("vector-relay pair v1|" + code), new Uint8Array([count])])));
+    }
+    var number = numberOf(joined(parts)) % prime;
+    return number * number % prime;
+  }
+
+  /* The room a computer holds at this address for this stretch of time, or null. */
+  async function lookRoom(origin, stretch) {
+    var named = await digest(bytesOf("vector-relay pair room v1|" + stretch));
+    var room = origin + "/c/pair" + toBase64(named).slice(0, 28);
+    var reply = await reach(room + "/state", { cache: "no-store" }, ROOM_HANG_MS);
+    if (reply.status !== 200) return null;
+    try {
+      var found = JSON.parse(await reply.text());
+      return found.v === 1 && typeof found.a === "string" && typeof found.t === "number" ? { base: room, a: found.a, t: found.t } : null;
+    } catch (error) { return null; }
+  }
+
+  /* The pairing link of the computer that shows this code. Throws trouble("no-code", "wrong", "silent" or "unreachable"). */
+  async function linkByCode(code) {
+    var origins = [location.origin], stretch = Math.floor(Date.now() / ROOM_EVERY_MS), looks = [];
+    if (link && link.u !== location.origin) origins.push(link.u);   // a page that is not at its relay's address
+    origins.forEach(function (origin) {   // a code lives 5 minutes, and the two clocks may differ by a few more
+      for (var step = -2; step <= 1; step += 1) looks.push(lookRoom(origin, stretch + step).catch(function () { return false; }));
+    });
+    var found = await Promise.all(looks);
+    var rooms = found.filter(Boolean).sort(function (a, b) { return b.t - a.t; });
+    if (!rooms.length) throw trouble(found.every(function (room) { return room === false; }) ? "unreachable" : "no-code");
+    var room = rooms[0], prime = BigInt("0x" + CODE_PRIME), one = BigInt(1);
+    var theirs = numberOf(fromBase64(room.a));
+    if (theirs <= one || theirs >= prime - one) throw trouble("no-code");
+    var secret = numberOf(crypto.getRandomValues(new Uint8Array(32))) + BigInt(2);
+    var mine = power(await codeBase(code, prime), secret, prime);
+    var shared = power(theirs * theirs % prime, secret, prime);
+    var key = await digest(joined([bytesOf("vector-relay pair v1 key|"), wide(theirs), wide(mine), wide(shared)]));
+    var proof = await signed(key, "proof"), sealKey = await signed(key, "seal");
+    var id = randomId();
+    var reply = await reach(room.base + "/ask/" + id, {
+      method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ b: toBase64(wide(mine)), m: toBase64(proof) }),
+    }, HANG_MS);
+    if (!reply.ok) throw trouble(reply.status === 404 ? "no-code" : "silent");
+    var started = Date.now();
+    while (Date.now() - started < CODE_WAIT_MS) {
+      var asked = Date.now();
+      reply = await reach(room.base + "/answer/" + id + "?wait=" + ANSWER_HOLD_S, { cache: "no-store" }, ANSWER_HANG_MS);
+      if (reply.status === 200) {
+        var answer = JSON.parse(await reply.text());
+        if (!answer.ok) {
+          var wrong = trouble("wrong");
+          wrong.left = answer.left;
+          throw wrong;
+        }
+        var raw = fromBase64(answer.link);
+        var opener = await subtle.importKey("raw", sealKey, "AES-GCM", false, ["decrypt"]);
+        var plain = await subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, opener, raw.slice(12));
+        return JSON.parse(new TextDecoder().decode(plain)).link;
+      }
+      if (reply.status !== 204) throw trouble("silent");
+      if (Date.now() - asked < 1000) await pause(400);   // this relay did not hold the request
+    }
+    throw trouble("silent");
+  }
+  function codeWhy(error) {
+    if (navigator.onLine === false || error.kind === "unreachable") return "This phone cannot reach the relay. Check its internet, then try again.";
+    if (error.kind === "no-code") return "No computer is showing a code right now. On that computer, type /phone code in a chat, then enter its 4 digits here.";
+    if (error.kind === "wrong" && error.left > 0) return "That is not the code. Check the 4 digits on the computer and try again.";
+    if (error.kind === "wrong") return "That is not the code, and it has stopped working now. Make a new code on the computer.";
+    return "The computer did not answer. Make a new code on it and try again.";
+  }
+
   // ------------------------------------------------------------ start
   function deviceLabels() {
     if (!active) return;
@@ -721,12 +847,23 @@
     location.reload();
   }
   var renaming = false;
+  var byCode = canCode;   // which of the two ways the dialog shows
+  var brought = null;     // {code, ticket}: what a code brought, kept in case only the name has to change
+  var linking = false;
+  function showWay(code) {
+    byCode = code && canCode;
+    $('codeFields').hidden = !byCode;
+    $('linkFields').hidden = byCode;
+    $('useCode').hidden = !canCode;
+    $('deviceError').hidden = true;
+  }
   function editDevice(rename) {
     renaming = rename;
     $('deviceDialogTitle').textContent = rename ? 'Rename device' : 'Add device';
     $('deviceName').value = rename && active ? active.name : '';
-    $('deviceLink').value = '';
-    $('deviceLink').required = !rename;
+    $('deviceLink').value = $('deviceCode').value = '';
+    brought = null;
+    showWay(true);
     $('pairFields').hidden = rename;
     $('deviceError').hidden = true;
     $('saveDevice').textContent = rename ? 'Save name' : 'Add and switch';
@@ -740,17 +877,42 @@
   $('addDevice').onclick = $('firstDevice').onclick = function () { editDevice(false); };
   $('renameDevice').onclick = function () { editDevice(true); };
   $('cancelDevice').onclick = function () { $('deviceDialog').close(); };
-  $('deviceDialog').onclose = function () { $('deviceLink').value = ''; };
-  $('deviceForm').onsubmit = function (event) {
+  $('useLink').onclick = function () { showWay(false); };
+  $('useCode').onclick = function () { showWay(true); };
+  $('deviceDialog').onclose = function () { $('deviceLink').value = $('deviceCode').value = ''; brought = null; };
+  $('deviceForm').onsubmit = async function (event) {
     event.preventDefault();
+    if (linking) return;
     var name = $('deviceName').value.trim();
     if (!name) return formError('Enter a name for this computer.');
     var ticket = renaming && active ? active.link : null;
-    if (!renaming) {
+    if (!renaming && byCode) {
+      var code = $('deviceCode').value.trim(), why = '';
+      if (!/^[0-9]{4}$/.test(code)) return formError('Type the 4 digits that computer shows.');
+      if (!brought || brought.code !== code) {
+        linking = true;
+        $('saveDevice').disabled = true;
+        $('saveDevice').textContent = 'Linking…';
+        $('deviceError').hidden = true;
+        try {
+          brought = { code: code, ticket: decodeTicket(new URL(await linkByCode(code)).hash) };
+          if (!brought.ticket) throw trouble('silent');
+        } catch (error) {
+          brought = null;
+          why = codeWhy(error);
+        }
+        linking = false;
+        $('saveDevice').disabled = false;
+        $('saveDevice').textContent = 'Add and switch';
+        if (!$('deviceDialog').open) { brought = null; return; }   // cancelled while the computer was asked
+        if (why) return formError(why);
+      }
+      ticket = brought.ticket;
+    } else if (!renaming) {
       try { ticket = decodeTicket(new URL($('deviceLink').value.trim()).hash); } catch (error) { ticket = null; }
       if (!ticket) return formError('That is not a Vector Relay pairing link. Copy the complete link from the QR.');
-      if (location.protocol === 'https:' && !ticket.u.startsWith('https:')) return formError('This is a local-only pairing. Use a Cloudflare pairing QR for access on cellular.');
     }
+    if (!renaming && ticket && location.protocol === 'https:' && !ticket.u.startsWith('https:')) return formError('This is a local-only pairing. Use a Cloudflare pairing QR for access on cellular.');
     if (!ticket) return;
     if (devices.some(function (d) { return idOf(d.link) !== idOf(ticket) && d.name.toLowerCase() === name.toLowerCase(); })) {
       return formError('Use a distinct name so you can tell the computers apart.');

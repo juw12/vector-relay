@@ -507,6 +507,167 @@ class TripTests(Case):
         self.assertEqual(relay.read_feed(self.folder), [])
 
 
+class CodeTests(Case):
+    """4 digits instead of the QR code: the phone that types them gets the link, and nobody else does."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fake = FakeRelay()
+        self.assertEqual(run(self.folder, "pair", "--relay", self.fake.address).returncode, 0)
+
+    def tearDown(self) -> None:
+        run(self.folder, "forget")  # ends the process that waits for the phone
+        super().tearDown()
+        self.fake.close()
+
+    def code(self, folder: Path | None = None) -> str:
+        made = run(folder or self.folder, "pair", "--code")
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        self.assertNotIn("#r=", made.stdout)
+        self.assertNotIn(relay.settings(folder or self.folder)["key"], made.stdout)
+        code = made.stdout.split("Code for the phone: ")[1][:4]
+        self.assertRegex(code, r"^\d{4}$")
+        self.channel = relay.read_json((folder or self.folder) / "pairing.json", {})["channel"]
+        self.assertIn(self.channel, (relay.code_room(time.time()), relay.code_room(time.time() - relay.ROOM_EVERY_S)))
+        return code
+
+    def room(self) -> Phone:
+        """The room the PC took. The phone page finds it by looking into the rooms of the last minutes."""
+        return Phone({"relay": self.fake.address, "channel": self.channel, "key": relay.b64(bytes(32))})
+
+    def type_code(self, code: str, wait: float = 12) -> dict | None:
+        """What the phone page does with the digits. None when no PC answers."""
+        room = self.room()
+        status, state = room.http("GET", "/state")
+        if status != 200:
+            return None
+        pc = int.from_bytes(relay.unb64(json.loads(state)["a"]), "big")
+        secret = 2 + secrets.randbits(256)
+        mine = relay.code_public(code, secret)
+        proof, seal_key = relay.code_keys(secret, pc, pc, mine)
+        ask_id = secrets.token_urlsafe(12)
+        said = json.dumps({"b": relay.b64(mine.to_bytes(256, "big")), "m": relay.b64(proof)})
+        if room.http("POST", "/ask/" + ask_id, said)[0] != 200:
+            return None
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            status, body = room.http("GET", "/answer/" + ask_id + "?wait=2")
+            if status == 200:
+                answer = json.loads(body)
+                if answer.get("ok"):
+                    answer["link"] = relay.unseal(seal_key, answer["link"])["link"]
+                return answer
+            if status != 204:
+                return None
+        return None
+
+    def test_the_right_code_brings_the_link_the_qr_code_holds(self) -> None:
+        code = self.code()
+        self.assertIn(code, run(self.folder, "status").stdout)
+        state = json.loads(self.room().http("GET", "/state")[1])
+        self.assertEqual(sorted(state), ["a", "t", "v"])  # the room shows one number that says nothing about the code
+
+        found = relay.settings(self.folder)
+        answer = self.type_code(code)
+        self.assertEqual(answer, {"ok": True, "link": found["page"] + "#r=" + relay.ticket(found)})
+        status = run(self.folder, "status").stdout
+        self.assertIn("a phone was linked with it", status)
+        self.assertNotIn(code, status)
+        self.assertNotIn("secret", (self.folder / "pairing.json").read_text(encoding="utf-8"))
+
+        self.assertIsNone(self.type_code(code, wait=3))  # one phone: the code is used up
+        deadline = time.time() + relay.CODE_GRACE_S + 15
+        while time.time() < deadline and self.room().http("GET", "/state")[0] != 404:
+            time.sleep(0.5)
+        self.assertEqual(self.room().http("GET", "/state")[0], 404)  # ... and the room is wiped
+
+    def test_wrong_codes_get_no_link_and_three_of_them_kill_the_code(self) -> None:
+        code = self.code()
+        wrong = f"{(int(code) + 1) % 10_000:04d}"
+        self.assertEqual([self.type_code(wrong) for attempt in range(3)],
+                         [{"ok": False, "left": 2}, {"ok": False, "left": 1}, {"ok": False, "left": 0}])
+        self.assertIsNone(self.type_code(code, wait=3))
+        self.assertIn("answered wrong 3 times", run(self.folder, "status").stdout)
+
+    def test_a_typing_mistake_leaves_the_code_alive(self) -> None:
+        code = self.code()
+        self.assertEqual(self.type_code(code[::-1] if code[::-1] != code else "0123"), {"ok": False, "left": 2})
+        self.assertTrue(self.type_code(code)["ok"])
+
+    def test_what_is_not_an_honest_number_counts_as_a_wrong_code(self) -> None:
+        self.code()
+        room, proof = self.room(), relay.b64(bytes(32))
+        for number, said in enumerate(("not json", json.dumps({"b": relay.b64((1).to_bytes(256, "big")), "m": proof}),
+                                       json.dumps({"b": relay.b64((relay.CODE_PRIME - 1).to_bytes(256, "big")), "m": proof}))):
+            ask_id = f"odd-ask-{number:04d}"
+            self.assertEqual(room.http("POST", "/ask/" + ask_id, said)[0], 200)
+            deadline = time.time() + 10
+            status, body = 204, ""
+            while time.time() < deadline and status != 200:
+                status, body = room.http("GET", "/answer/" + ask_id + "?wait=2")
+            self.assertEqual(json.loads(body), {"ok": False, "left": 2 - number})
+
+    def test_both_sides_make_the_same_key_only_from_the_same_code(self) -> None:
+        pc_secret, phone_secret = 2 + secrets.randbits(256), 2 + secrets.randbits(256)
+        pc, phone = relay.code_public("4821", pc_secret), relay.code_public("4821", phone_secret)
+        self.assertEqual(relay.code_keys(pc_secret, phone, pc, phone), relay.code_keys(phone_secret, pc, pc, phone))
+        other = relay.code_public("4822", phone_secret)
+        self.assertNotEqual(relay.code_keys(pc_secret, other, pc, other), relay.code_keys(phone_secret, pc, pc, other))
+        for odd in (0, 1, relay.CODE_PRIME - 1, relay.CODE_PRIME, relay.CODE_PRIME + 5):
+            self.assertIsNone(relay.code_keys(pc_secret, odd, pc, odd))
+        self.assertEqual(pow(relay.code_base("4821"), (relay.CODE_PRIME - 1) // 2, relay.CODE_PRIME), 1)  # in the large half
+
+    def test_the_room_is_named_by_the_time_alone(self) -> None:
+        now = 1_800_000_000.0
+        self.assertRegex(relay.code_room(now), r"^[A-Za-z0-9_-]{16,64}$")
+        self.assertEqual(relay.code_room(now), relay.code_room(now + relay.ROOM_EVERY_S - 1))
+        self.assertNotEqual(relay.code_room(now), relay.code_room(now + relay.ROOM_EVERY_S))
+
+    def test_a_new_code_ends_the_old_one(self) -> None:
+        old = self.code()
+        new = self.code()
+        if old != new:
+            self.assertEqual(self.type_code(old), {"ok": False, "left": 2})
+        self.assertTrue(self.type_code(new)["ok"])
+
+    def test_a_second_pc_waits_its_turn(self) -> None:
+        other = Path(tempfile.mkdtemp(prefix="home-", dir=SCRATCH))
+        try:
+            self.assertEqual(run(other, "pair", "--relay", self.fake.address).returncode, 0)
+            self.code()
+            taken = run(other, "pair", "--code")
+            self.assertEqual(taken.returncode, 5)
+            self.assertIn("another computer is showing a code", taken.stdout)
+            run(self.folder, "forget")
+            code = self.code(other)
+            found = relay.settings(other)
+            self.assertEqual(self.type_code(code)["link"], found["page"] + "#r=" + relay.ticket(found))
+        finally:
+            run(other, "forget")
+            shutil.rmtree(other, ignore_errors=True)
+
+    def test_a_code_runs_out(self) -> None:
+        kept = {"state": "waiting", "code": "4821", "secret": hex(5), "made": int(time.time()) - relay.CODE_VALID_S - 1,
+                "channel": relay.code_room(time.time()), "write": secrets.token_urlsafe(24)}
+        room = relay.room_relay(relay.settings(self.folder), kept)
+        self.assertEqual(room.call("PUT", "/state", "{}", owner=True)[0], 200)
+        relay.write_json(self.folder / "pairing.json", kept)
+        self.assertEqual(relay.wait_for_code(self.folder), 0)  # what `pair --code` leaves running, here at once
+        self.assertEqual(relay.read_json(self.folder / "pairing.json", {})["state"], "expired")
+        self.assertEqual(room.call("GET", "/state")[0], 404)
+        room.close()
+        self.assertIn("ran out", run(self.folder, "status").stdout)
+
+    def test_forget_ends_the_code_and_local_mode_has_none(self) -> None:
+        self.code()
+        run(self.folder, "forget")
+        self.assertEqual(self.room().http("GET", "/state")[0], 404)
+        self.assertFalse((self.folder / "pairing.json").exists())
+        local = run(self.folder, "pair", "--local", "--host", "127.0.0.1", "--code")
+        self.assertEqual(local.returncode, 2)
+        self.assertIn("A code needs the relay", local.stdout)
+
+
 def free_port() -> int:
     import socket
 

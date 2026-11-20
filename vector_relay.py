@@ -18,6 +18,10 @@ phone only inside the QR code, after the "#" of the address, which a browser sen
 The relay (functions/ in this repo, on Cloudflare Pages with a D1 database) holds ciphertext it
 cannot read, and can at worst lose or delay it. The phone needs the internet, not your Wi-Fi.
 
+`pair --code` links a phone with 4 digits instead of the QR code. The digits never travel: PC and
+phone each prove they know them (SPEKE), and the link with the key then comes sealed with a key the
+two made in that exchange. The relay learns neither, and a guess costs one of three tries.
+
 A prompt is carried out once: its id is remembered, and one older than PROMPT_MAX_AGE_S is refused,
 so a recorded prompt cannot be played again and one the phone marked "not sent" does not arrive later.
 
@@ -31,6 +35,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -49,7 +55,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -94,6 +100,10 @@ LISTEN_BEAT_S, LISTEN_FRESH_S = 5, 15
 IDLE_ON_S = 6 * 3600  # the helper stops this long after the chat last said or heard anything
 IDLE_OFF_S = 10 * 60  # ... and this long after phone mode was switched off
 TIMEOUT_S = 35  # longer than the relay holds a request
+CODE_VALID_S = 5 * 60  # a 4-digit code links a phone this long
+CODE_TRIES = 3  # ... and takes this many answers; then it is dead, right or wrong
+CODE_GRACE_S = 15  # the phone gets this long to fetch the last answer before the room is wiped
+ROOM_EVERY_S = 5 * 60  # the room where a code is used has a new name this often
 KEEP_IDLE_S = 30  # a connection that was silent this long is not used again: proxies drop them
 
 
@@ -606,18 +616,14 @@ def helper_running(folder: Path) -> bool:
         return False
 
 
-def start_helper(folder: Path) -> bool:
-    """Starts the helper unless one runs. True when one is running afterwards."""
-    if not paired(settings(folder)):
-        return False
-    if helper_running(folder):
-        return True
-    command = [sys.executable, str(Path(__file__).resolve()), "serve"]
+def start_alone(folder: Path, name: str) -> None:
+    """Starts one of this file's commands so that it is still there when the chat's command has ended."""
+    command = [sys.executable, str(Path(__file__).resolve()), name]
     options = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
                "env": {**os.environ, "VECTOR_RELAY_HOME": str(folder)}, "cwd": str(folder)}
     if os.name == "nt":
         # no console, its own group, normal priority (a job started from a chat runs below normal),
-        # and outside the chat's job so it is still there when the chat's command has ended
+        # and outside the chat's job
         flags = 0x00000008 | 0x00000200 | 0x00000020
         try:
             subprocess.Popen(command, creationflags=flags | 0x01000000, **options)
@@ -625,6 +631,15 @@ def start_helper(folder: Path) -> bool:
             subprocess.Popen(command, creationflags=flags, **options)
     else:
         subprocess.Popen(command, start_new_session=True, **options)
+
+
+def start_helper(folder: Path) -> bool:
+    """Starts the helper unless one runs. True when one is running afterwards."""
+    if not paired(settings(folder)):
+        return False
+    if helper_running(folder):
+        return True
+    start_alone(folder, "serve")
     for attempt in range(30):
         if helper_running(folder):
             return True
@@ -917,6 +932,180 @@ def serve_local(folder: Path, found: dict, guard: socket.socket) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- a 4-digit code instead of the QR code
+# How 4 digits can stand in for a 256-bit key.
+#
+# Both sides turn the code into a number, raise it to a secret of their own and swap the results
+# (SPEKE, in the 2048-bit group of RFC 3526). Only two sides that started from the same code end
+# with the same key. What crosses the relay says nothing about the code: nobody can try the 10,000
+# codes at home, and each guess has to be sent to this PC, which takes CODE_TRIES of them. The link
+# with the real key then travels sealed with the key the two just made.
+#
+# The swap happens in a "room": a channel of the relay whose name comes from the time alone, so the
+# name gives the code away to nobody. One PC at a time can hold it.
+CODE_PRIME = int(
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DD"
+    "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED"
+    "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F"
+    "83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B"
+    "E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA0510"
+    "15728E5A8AACAA68FFFFFFFFFFFFFFFF",
+    16,
+)
+
+
+def code_room(moment: float) -> str:
+    """The channel where a code is used in the ROOM_EVERY_S that hold this moment."""
+    named = hashlib.sha256(f"vector-relay pair room v1|{int(moment // ROOM_EVERY_S)}".encode("ascii")).digest()
+    return "pair" + b64(named)[:28]
+
+
+def code_base(code: str) -> int:
+    """The code as a member of the group: 320 hashed bytes, squared so that it lands in the large half."""
+    wide = b"".join(hashlib.sha256(b"vector-relay pair v1|" + code.encode("utf-8") + bytes([count])).digest() for count in range(10))
+    return pow(int.from_bytes(wide, "big") % CODE_PRIME, 2, CODE_PRIME)
+
+
+def code_public(code: str, secret: int) -> int:
+    """What one side sends the other."""
+    return pow(code_base(code), secret, CODE_PRIME)
+
+
+def code_keys(secret: int, theirs: int, pc: int, phone: int) -> tuple[bytes, bytes] | None:
+    """(the proof the phone sends, the key that seals the link), or None for a number no honest side sends."""
+    if not 1 < theirs < CODE_PRIME - 1:
+        return None
+    shared = pow(theirs * theirs % CODE_PRIME, secret, CODE_PRIME)
+    key = hashlib.sha256(b"vector-relay pair v1 key|" + b"".join(number.to_bytes(256, "big") for number in (pc, phone, shared))).digest()
+    return hmac.new(key, b"proof", "sha256").digest(), hmac.new(key, b"seal", "sha256").digest()
+
+
+def room_relay(found: dict, kept: dict) -> Relay:
+    return Relay({"relay": found["relay"], "channel": kept["channel"], "write": kept["write"], "key": b64(bytes(32))})
+
+
+def end_code(folder: Path) -> None:
+    """A code that still waits stops working: its room is wiped, and the process that waits there ends."""
+    kept, found = read_json(folder / "pairing.json", {}), settings(folder)
+    if kept.get("state") == "waiting" and found.get("relay") and not found.get("local"):
+        relay = room_relay(found, kept)
+        try:
+            relay.call("DELETE", "", owner=True)
+        except OSError:
+            pass  # the room is gone by itself when the code runs out
+        relay.close()
+    (folder / "pairing.json").unlink(missing_ok=True)
+
+
+def offer_code(folder: Path) -> int:
+    """Makes a code, takes the room and leaves a process there that waits for the phone."""
+    found = settings(folder)
+    end_code(folder)
+    code, secret, now = f"{secrets.randbelow(10_000):04d}", 2 + secrets.randbits(256), time.time()
+    kept = {"state": "waiting", "code": code, "secret": hex(secret), "made": int(now),
+            "channel": code_room(now), "write": secrets.token_urlsafe(24)}
+    public = code_public(code, secret).to_bytes(256, "big")
+    relay = room_relay(found, kept)
+    try:
+        status, _ = relay.call("PUT", "/state", json.dumps({"v": 1, "a": b64(public), "t": int(now * 1000)}), owner=True)
+    except OSError as error:
+        print(f"No code: cannot reach the relay ({error}). The QR code still works:  {ME} pair --open")
+        return 5
+    finally:
+        relay.close()
+    if status == 403:
+        print("No code: another computer is showing a code on this relay right now. Finish that one, or try again in a few minutes.")
+        return 5
+    if status != 200:
+        print(f"No code: the relay answered {status}. The QR code still works:  {ME} pair --open")
+        return 5
+    write_json(folder / "pairing.json", kept)
+    start_alone(folder, "pair-wait")
+    print(f"Code for the phone: {code}")
+    print(f"On the phone: Device, + Add device, a name, these 4 digits. It links one phone, within {CODE_VALID_S // 60} minutes.")
+    return 0
+
+
+def wait_for_code(folder: Path) -> int:
+    """Waits in the room for a phone that knows the code, hands it the link, and wipes the room."""
+    kept, found = read_json(folder / "pairing.json", {}), settings(folder)
+    if kept.get("state") != "waiting" or not paired(found):
+        return 0
+    relay = room_relay(found, kept)
+    secret = int(kept["secret"], 16)
+    mine = code_public(kept["code"], secret)
+    tries, ended = CODE_TRIES, "expired"
+
+    def answer(ask: dict, reply: dict) -> None:
+        relay.call("PUT", "/answer/" + str(ask.get("id", "")), json.dumps(reply), owner=True)
+
+    try:
+        while ended == "expired" and time.time() < kept["made"] + CODE_VALID_S:
+            left = kept["made"] + CODE_VALID_S - time.time()
+            try:
+                status, body = relay.call("POST", f"/asks/take?wait={int(max(1, min(TAKE_HOLD_S, left)))}", owner=True)
+                if status == 404:  # a newer code, `forget`, or another PC's room by now
+                    ended = "ended"
+                    break
+                if status != 200:
+                    raise OSError(f"the relay answered {status}")
+                asks = json.loads(body.decode("utf-8")).get("asks", [])
+                for ask in asks:
+                    try:
+                        said = json.loads(str(ask.get("body", ""))[:2000])
+                        theirs, proof = int.from_bytes(unb64(said["b"]), "big"), unb64(said["m"])
+                        keys = code_keys(secret, theirs, mine, theirs)
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        keys, proof = None, b""
+                    if keys is not None and hmac.compare_digest(keys[0], proof):
+                        found = settings(folder)
+                        link = found.get("page", found["relay"] + "/") + "#r=" + ticket(found)
+                        answer(ask, {"ok": True, "link": seal(keys[1], {"link": link})})
+                        ended = "linked"
+                        break
+                    tries -= 1
+                    answer(ask, {"ok": False, "left": tries})
+                    if tries <= 0:
+                        ended = "wrong"
+                        break
+                if not asks:
+                    time.sleep(0.2)  # a relay that does not hold the request must not be asked in a tight loop
+            except (OSError, ValueError) as error:
+                log(folder, f"code: {error}")
+                time.sleep(3)
+        if read_json(folder / "pairing.json", {}).get("write") == kept["write"]:  # not a newer code's file
+            write_json(folder / "pairing.json", {"state": ended, "ended": int(time.time()), "write": kept["write"]})
+        log(folder, f"code: {ended}")
+        if ended in ("linked", "wrong"):
+            time.sleep(CODE_GRACE_S)
+    finally:
+        try:
+            relay.call("DELETE", "", owner=True)
+        except OSError:
+            pass
+        relay.close()
+    return 0
+
+
+CODE_ENDED = {
+    "linked": "a phone was linked with it",
+    "wrong": f"it was answered wrong {CODE_TRIES} times, so it is dead: make a new one",
+    "expired": "it ran out before a phone used it",
+    "ended": "it was replaced",
+}
+
+
+def code_line(folder: Path) -> str:
+    """What became of the last code, for `status`. "" when there never was one."""
+    kept = read_json(folder / "pairing.json", {})
+    if kept.get("state") == "waiting":
+        left = kept.get("made", 0) + CODE_VALID_S - time.time()
+        return f"{kept.get('code', '')}, good for {max(1, round(left / 60))} more min" if left > 0 else CODE_ENDED["expired"]
+    if kept.get("state") in CODE_ENDED:
+        return f"{CODE_ENDED[kept['state']]} ({time.strftime('%H:%M', time.localtime(kept.get('ended', 0)))})"
+    return ""
+
+
 # ---------------------------------------------------------------- commands
 ME = "vector_relay.py"
 SEVERAL = "Several chats are in phone mode. Say which one with --chat <id>:"
@@ -929,8 +1118,11 @@ def say_chats(folder: Path) -> None:
 
 
 def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_picture: bool,
-                 local: bool = False, port: int = LOCAL_PORT, host: str = "") -> int:
+                 local: bool = False, port: int = LOCAL_PORT, host: str = "", code: bool = False) -> int:
     found = settings(folder)
+    if code and (local or (found.get("local") and not relay)):
+        print(f"A code needs the relay. In local mode the phone scans the QR code:  {ME} pair --local --open")
+        return 2
     if local:
         address = f"http://{host or local_name()}:{port}"
         if not RELAY_ADDRESS.match(address) or not 1024 <= port <= 65535:
@@ -976,7 +1168,7 @@ def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_pict
             print(f"The helper still runs with the old settings. Run:  {ME} stop")
     if show_link:
         print(link)
-    return 0
+    return offer_code(folder) if code else 0
 
 
 def command_on(folder: Path, label: str, named: str) -> int:
@@ -1136,6 +1328,8 @@ def command_status(folder: Path) -> int:
     else:
         print(f"Relay:      {urllib.parse.urlsplit(found['relay']).netloc}")
     print(f"Phone page: {found.get('page', found['relay'] + '/')}")
+    if code_line(folder):
+        print(f"Code:       {code_line(folder)}")
     on = chats_on(folder)
     print(f"Phone mode: {'on in ' + str(len(on)) + ' chat(s)' if on else 'off'}")
     for chat, entry in chats(folder).items():
@@ -1169,6 +1363,7 @@ def command_forget(folder: Path) -> int:
     """Unlinks every phone: wipes this channel at the relay, the key, the feed and the pictures. The relay address stays."""
     found = settings(folder)
     command_stop(folder)
+    end_code(folder)
     if paired(found) and found.get("local"):
         print("The old key is gone: the phone that had it is no longer linked.")
     elif paired(found):
@@ -1252,6 +1447,7 @@ def main(arguments: list[str] | None = None) -> int:
     pair.add_argument("--host", default="", help="local mode: this PC's name or address as the phone reaches it (default <its name>.local)")
     pair.add_argument("--show-link", action="store_true", help="print the link (it holds the key)")
     pair.add_argument("--open", action="store_true", help="open the QR picture")
+    pair.add_argument("--code", action="store_true", help="also show 4 digits to type on the phone instead of scanning")
     on = commands.add_parser("on", help="phone mode on for a chat; prints its chat id")
     on.add_argument("--label", default="", help="a name for this chat, shown on the phone")
     on.add_argument("--chat", default="", help="the id of a chat that was on before, to switch it on again")
@@ -1269,6 +1465,7 @@ def main(arguments: list[str] | None = None) -> int:
     listen.add_argument("--chat", default="", help="which chat, when several are on")
     commands.add_parser("status", help="what is linked and running")  # listen: 0 prompt or none, 3 off, 4 replaced
     commands.add_parser("serve", help="run the helper in this window (it normally starts by itself)")
+    commands.add_parser("pair-wait", help="wait for the phone that types the code (`pair --code` starts this by itself)")
     commands.add_parser("stop", help="stop the helper")
     commands.add_parser("forget", help="unlink every phone and clear the feed")
     chosen = parser.parse_args(arguments)
@@ -1283,7 +1480,7 @@ def main(arguments: list[str] | None = None) -> int:
         return 2
     if chosen.command == "pair":
         return command_pair(folder, chosen.relay, chosen.page, chosen.show_link, chosen.open,
-                            chosen.local, chosen.port, chosen.host)
+                            chosen.local, chosen.port, chosen.host, chosen.code)
     if chosen.command == "on":
         return command_on(folder, chosen.label, chosen.chat)
     if chosen.command == "off":
@@ -1296,6 +1493,8 @@ def main(arguments: list[str] | None = None) -> int:
         return command_status(folder)
     if chosen.command == "serve":
         return serve(folder)
+    if chosen.command == "pair-wait":
+        return wait_for_code(folder)
     if chosen.command == "stop":
         return command_stop(folder)
     return command_forget(folder)

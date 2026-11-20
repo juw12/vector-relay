@@ -18,7 +18,7 @@
 <meta name="apple-mobile-web-app-title" content="Vector Relay">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=1.2.0">
+<link rel="stylesheet" href="styles.css?v=1.3.0">
 </head>
 <body>
 <aside id="side" class="side" aria-label="Chats">
@@ -45,9 +45,18 @@
     <label for="deviceName">Device name</label>
     <input id="deviceName" required maxlength="40" placeholder="e.g. ASUS laptop">
     <div id="pairFields">
-      <label for="deviceLink">Private pairing link</label>
-      <input id="deviceLink" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste pairing link">
-      <p>Point your iPhone Camera at the other computer’s Vector Relay QR and copy its link. Paste it here, not in a chat.</p>
+      <div id="codeFields">
+        <label for="deviceCode">4-digit code from that computer</label>
+        <input id="deviceCode" class="code" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="0000">
+        <p>On that computer, type <strong>/phone code</strong> in a chat. It shows 4 digits that work for 5 minutes.</p>
+        <button type="button" id="useLink" class="other-way">Use a pairing link instead</button>
+      </div>
+      <div id="linkFields" hidden>
+        <label for="deviceLink">Private pairing link</label>
+        <input id="deviceLink" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste pairing link">
+        <p>Point your iPhone Camera at the other computer’s Vector Relay QR and copy its link. Paste it here, not in a chat.</p>
+        <button type="button" id="useCode" class="other-way">Use a 4-digit code instead</button>
+      </div>
     </div>
     <p id="deviceError" role="alert" hidden></p>
     <div class="device-actions"><button type="button" id="cancelDevice">Cancel</button><button type="submit" id="saveDevice">Add and switch</button></div>
@@ -75,8 +84,9 @@
       <li>On the PC, type <strong>/phone</strong> in a chat.</li>
       <li>Scan the QR code it shows with this phone's camera.</li>
     </ol>
+    <p>No camera at hand? Type <strong>/phone code</strong> instead, tap the button below and enter the 4 digits.</p>
     <p class="soft">The code holds a key that only your PC and this phone have. Everything between them travels sealed with it.</p>
-    <button type="button" id="firstDevice">Add device with a pairing link</button>
+    <button type="button" id="firstDevice">Add device with a code</button>
   </section>
 
   <aside id="hint" class="hint" hidden>
@@ -109,6 +119,6 @@
 
 <noscript><p class="sheet">This page needs JavaScript: it opens the sealed text from your PC on this phone.</p></noscript>
 <script src="softcrypto.js?v=1.1.0"></script>
-<script src="app.js?v=1.2.0"></script>
+<script src="app.js?v=1.3.0"></script>
 </body>
 </html>

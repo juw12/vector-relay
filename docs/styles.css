@@ -64,6 +64,8 @@ button, input, textarea { font: inherit; }
 #deviceDialog p { color: var(--dim); font-size: 14px; }
 #deviceDialog .device-actions { margin-top: 10px; }
 #deviceDialog #deviceError { color: var(--orange); }
+#deviceDialog input.code { font-size: 28px; letter-spacing: .5em; text-align: center; font-variant-numeric: tabular-nums; }
+#deviceDialog .other-way { min-height: 42px; padding: 4px 0; border: 0; background: transparent; color: var(--link); font: inherit; font-size: 14px; cursor: pointer; }
 
 /* ---- the chat list */
 .side {

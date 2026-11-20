@@ -53,6 +53,14 @@ a Cloudflare Pages project with one Pages Function (`functions/`) and one D1 dat
 3. On the iPhone: Share, then **Add to Home Screen**.
 4. In a chat on the PC, type `/phone` (with the skill installed), and leave.
 
+**A second computer, or no camera at hand: 4 digits instead of the QR code.** On that computer
+type `/phone code` in a chat (or run `python vector_relay.py pair --code`). It shows 4 digits.
+On the phone: **Device**, **+ Add device**, a name, the 4 digits. A code links one phone, works
+for 5 minutes and dies after 3 wrong answers. One phone page then holds every computer you
+added; choose the computer under **Device** first, then the chat.
+
+![The 4 digits on the phone](shots/phone-code.png)
+
 To run your own relay instead of the public one: the four commands at the top of `wrangler.toml`,
 then `pair --relay https://<your-project>.pages.dev`. A relay sees ciphertext only, so sharing one
 is safe; your own gives you your own free quota.
@@ -76,6 +84,11 @@ is safe; your own gives you your own free quota.
   key is made on the PC and reaches the phone only inside the QR code, after the `#` of the
   address, which a browser sends to no server.
 - The relay stores sealed text it cannot read. At worst it can lose or delay it.
+- A 4-digit code never travels. PC and phone each prove they know it (SPEKE, RFC 3526 group
+  14), and the link with the key then comes sealed with a key the two made in that exchange.
+  Nobody can try the 10,000 codes at home: each guess has to reach the PC, which takes three
+  and then drops the code. That leaves a stranger who knows your relay's address and guesses
+  during your 5 minutes 3 chances in 10,000. Make a code only when you are about to type it.
 - Whoever holds the key can prompt your chats. Do not share the QR picture, the link, or the Home
   Screen icon's address. Lost the phone: `vector_relay.py forget`, then pair again.
 - A prompt is carried out once. Its id is remembered, and one older than 15 seconds (45 with a
@@ -95,9 +108,10 @@ the last chat leaves phone mode.
 
 ## Tests
 
-    python -m unittest discover -s tests   39 tests: seal, feed, inbox, chats, pictures, commands, whole trips
+    python -m unittest discover -s tests   57 tests: seal, feed, inbox, chats, pictures, commands, whole trips,
+                                           local mode, the 4-digit code
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
-                                           (as a Pixel 7), relay rules in memory: 41 steps
+                                           (as a Pixel 7), relay rules in memory: 64 steps
     python scripts/e2e.py --live           the same steps on the deployed page and relay, on a
                                            throwaway channel that is wiped at the end
 
