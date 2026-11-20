@@ -370,7 +370,7 @@
     var last = seen.length ? seen[seen.length - 1] : null;
     if (problem) return ["bad", problem, !!own && own.on];
     if (!info.pc) return ["", "Asking your PC", false];
-    if (!own) return ["", "No chat is in phone mode. On the PC, type /phone in a chat.", false];
+    if (!own) return ["", active ? "No chat on " + active.name + " is in phone mode. On that computer, type /phone in a chat." : "No chat is in phone mode. On the PC, type /phone in a chat.", false];
     if (!own.on) {
       var others = info.chats.some(function (c) { return c.on; });
       return ["", "This chat left phone mode." + (others ? " Pick another one from the chat list." : " On the PC, type /phone in a chat."), false];
@@ -587,11 +587,12 @@
       return "This phone cannot reach the relay. Check its internet, or switch between Wi-Fi and mobile data.";
     }
     if (reply.status === 404 && local) return "Your PC does not know this phone's code any more. Make a new code on the PC and scan it.";
-    if (reply.status === 404) return "The relay has nothing for this phone yet. On the PC, type /phone in a chat. If that does not help, make a new code there and scan it.";
+    if (reply.status === 404) return "The relay has nothing from this computer yet. On the computer, type /phone in a chat. If that does not help, add it again: type /phone code there.";
     if (!reply.ok) return "The relay answered with an error (" + reply.status + "). Try again in a minute.";
     try { merge(await unseal(await reply.text()), false); }
     catch (failure) { return "The key on this phone does not open what the PC sends. Scan a new code on the PC."; }
     if (error.kind === "refused") return "The relay answered with an error (" + error.status + "). Try again in a minute.";
+    if (!info.chats.some(function (c) { return c.on; })) return "";   // the computer itself said no chat is in phone mode: nothing is broken
     return "Your PC does not answer" + (info.pc ? ". It was last heard from " + ago(info.pc) + "." : ".") + " Is it on, and is a chat in phone mode?";
   }
 

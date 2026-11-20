@@ -55,7 +55,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -1001,18 +1001,25 @@ def offer_code(folder: Path) -> int:
     """Makes a code, takes the room and leaves a process there that waits for the phone."""
     found = settings(folder)
     end_code(folder)
-    code, secret, now = f"{secrets.randbelow(10_000):04d}", 2 + secrets.randbits(256), time.time()
-    kept = {"state": "waiting", "code": code, "secret": hex(secret), "made": int(now),
-            "channel": code_room(now), "write": secrets.token_urlsafe(24)}
+    code, secret, started = f"{secrets.randbelow(10_000):04d}", 2 + secrets.randbits(256), time.time()
     public = code_public(code, secret).to_bytes(256, "big")
-    relay = room_relay(found, kept)
-    try:
-        status, _ = relay.call("PUT", "/state", json.dumps({"v": 1, "a": b64(public), "t": int(now * 1000)}), owner=True)
-    except OSError as error:
-        print(f"No code: cannot reach the relay ({error}). The QR code still works:  {ME} pair --open")
-        return 5
-    finally:
-        relay.close()
+    while True:
+        now = time.time()
+        kept = {"state": "waiting", "code": code, "secret": hex(secret), "made": int(now),
+                "channel": code_room(now), "write": secrets.token_urlsafe(24)}
+        relay = room_relay(found, kept)
+        try:
+            status, _ = relay.call("PUT", "/state", json.dumps({"v": 1, "a": b64(public), "t": int(now * 1000)}), owner=True)
+        except OSError as error:
+            print(f"No code: cannot reach the relay ({error}). The QR code still works:  {ME} pair --open")
+            return 5
+        finally:
+            relay.close()
+        # The room is kept CODE_GRACE_S after a code was used. Two computers added one after the
+        # other meet there, so the second waits that long for the room before it gives up.
+        if status != 403 or now - started > CODE_GRACE_S + 5:
+            break
+        time.sleep(2)
     if status == 403:
         print("No code: another computer is showing a code on this relay right now. Finish that one, or try again in a few minutes.")
         return 5
@@ -1024,6 +1031,23 @@ def offer_code(folder: Path) -> int:
     print(f"Code for the phone: {code}")
     print(f"On the phone: Device, + Add device, a name, these 4 digits. It links one phone, within {CODE_VALID_S // 60} minutes.")
     return 0
+
+
+def show_to_phone(folder: Path) -> None:
+    """A phone that was just linked finds this computer at the relay, also while no chat is in phone mode."""
+    found = settings(folder)
+    if helper_running(folder) or not paired(found) or found.get("local"):
+        return  # the helper keeps the relay's copy fresh by itself
+    relay = Relay(found)
+    try:
+        state = feed_answer(folder, limit=STATE_EVENTS, text_max=STATE_TEXT, bytes_max=STATE_BYTES)
+        status, _ = relay.call("PUT", "/state", seal(relay.key, state), owner=True)
+        if status != 200:
+            log(folder, f"code: the relay answered {status} to this computer's state")
+    except OSError as error:
+        log(folder, f"code: this computer's state did not reach the relay ({error})")
+    finally:
+        relay.close()
 
 
 def wait_for_code(folder: Path) -> int:
@@ -1060,6 +1084,7 @@ def wait_for_code(folder: Path) -> int:
                     if keys is not None and hmac.compare_digest(keys[0], proof):
                         found = settings(folder)
                         link = found.get("page", found["relay"] + "/") + "#r=" + ticket(found)
+                        show_to_phone(folder)
                         answer(ask, {"ok": True, "link": seal(keys[1], {"link": link})})
                         ended = "linked"
                         break
@@ -1118,8 +1143,14 @@ def say_chats(folder: Path) -> None:
 
 
 def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_picture: bool,
-                 local: bool = False, port: int = LOCAL_PORT, host: str = "", code: bool = False) -> int:
+                 local: bool = False, port: int = LOCAL_PORT, host: str = "", code: bool = False,
+                 no_code: bool = False) -> int:
     found = settings(folder)
+    if no_code:
+        waited = read_json(folder / "pairing.json", {}).get("state") == "waiting"
+        end_code(folder)
+        print("The code is off. It links no phone any more." if waited else "No code was waiting for a phone.")
+        return 0
     if code and (local or (found.get("local") and not relay)):
         print(f"A code needs the relay. In local mode the phone scans the QR code:  {ME} pair --local --open")
         return 2
@@ -1150,6 +1181,8 @@ def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_pict
     write_json(folder / "settings.json", found)
     link = found["page"] + "#r=" + ticket(found)
     picture = folder / "pair.png"
+    if code and not open_picture and not show_link:
+        return offer_code(folder)  # he asked for 4 digits: nothing about the QR code to read past
     try:
         import segno
 
@@ -1447,7 +1480,8 @@ def main(arguments: list[str] | None = None) -> int:
     pair.add_argument("--host", default="", help="local mode: this PC's name or address as the phone reaches it (default <its name>.local)")
     pair.add_argument("--show-link", action="store_true", help="print the link (it holds the key)")
     pair.add_argument("--open", action="store_true", help="open the QR picture")
-    pair.add_argument("--code", action="store_true", help="also show 4 digits to type on the phone instead of scanning")
+    pair.add_argument("--code", action="store_true", help="show 4 digits to type on the phone instead of scanning")
+    pair.add_argument("--no-code", action="store_true", help="take back the code that waits for a phone")
     on = commands.add_parser("on", help="phone mode on for a chat; prints its chat id")
     on.add_argument("--label", default="", help="a name for this chat, shown on the phone")
     on.add_argument("--chat", default="", help="the id of a chat that was on before, to switch it on again")
@@ -1480,7 +1514,7 @@ def main(arguments: list[str] | None = None) -> int:
         return 2
     if chosen.command == "pair":
         return command_pair(folder, chosen.relay, chosen.page, chosen.show_link, chosen.open,
-                            chosen.local, chosen.port, chosen.host, chosen.code)
+                            chosen.local, chosen.port, chosen.host, chosen.code, chosen.no_code)
     if chosen.command == "on":
         return command_on(folder, chosen.label, chosen.chat)
     if chosen.command == "off":

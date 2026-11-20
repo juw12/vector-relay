@@ -630,6 +630,43 @@ class CodeTests(Case):
             self.assertEqual(self.type_code(old), {"ok": False, "left": 2})
         self.assertTrue(self.type_code(new)["ok"])
 
+    def test_a_code_prints_alone_and_can_be_taken_back(self) -> None:
+        made = run(self.folder, "pair", "--code")
+        self.assertEqual(len(made.stdout.strip().splitlines()), 2, made.stdout)  # the digits, and where to type them
+        self.assertNotIn("QR code", made.stdout)
+        code = made.stdout.split("Code for the phone: ")[1][:4]
+        self.channel = relay.read_json(self.folder / "pairing.json", {})["channel"]
+        back = run(self.folder, "pair", "--no-code")
+        self.assertEqual(back.returncode, 0)
+        self.assertIn("The code is off", back.stdout)
+        self.assertEqual(self.room().http("GET", "/state")[0], 404)
+        self.assertIsNone(self.type_code(code, wait=3))
+        self.assertNotIn("Code:", run(self.folder, "status").stdout)
+        self.assertIn("No code was waiting", run(self.folder, "pair", "--no-code").stdout)
+        self.assertTrue(relay.paired(relay.settings(self.folder)))  # the pairing itself stays
+
+    def test_a_linked_phone_finds_the_computer_at_the_relay_before_any_chat_is_in_phone_mode(self) -> None:
+        phone = Phone(relay.settings(self.folder))
+        self.assertEqual(phone.http("GET", "/state")[0], 404)  # no helper ran yet: the relay knows nothing of this PC
+        self.assertTrue(self.type_code(self.code())["ok"])
+        status, sealed = phone.http("GET", "/state")
+        self.assertEqual(status, 200)
+        state = relay.unseal(phone.key, sealed)
+        self.assertTrue(state["ok"])
+        self.assertFalse([chat for chat in state["chats"] if chat["on"]])
+
+    def test_the_next_computer_gets_its_code_right_after_the_first_one_was_used(self) -> None:
+        other = Path(tempfile.mkdtemp(prefix="home-", dir=SCRATCH))
+        try:
+            self.assertEqual(run(other, "pair", "--relay", self.fake.address).returncode, 0)
+            self.assertTrue(self.type_code(self.code())["ok"])  # the room is kept CODE_GRACE_S from here
+            code = self.code(other)  # waits for the room instead of giving up
+            found = relay.settings(other)
+            self.assertEqual(self.type_code(code)["link"], found["page"] + "#r=" + relay.ticket(found))
+        finally:
+            run(other, "forget")
+            shutil.rmtree(other, ignore_errors=True)
+
     def test_a_second_pc_waits_its_turn(self) -> None:
         other = Path(tempfile.mkdtemp(prefix="home-", dir=SCRATCH))
         try:
