@@ -496,3 +496,16 @@ body.side-open .side {
   .menu { display: none; }
   .bar { padding-left: 20px; }
 }
+
+/* version history */
+.versions-link { display: block; margin: 14px 12px 10px; min-height: 42px; padding: 4px 0; border: 0; background: transparent; color: var(--link); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+#versionsDialog { width: min(92vw, 460px); max-height: 88dvh; overflow-y: auto; padding: 20px; border: 1px solid var(--edge); border-radius: 14px; background: var(--card); color: var(--ink); }
+#versionsDialog::backdrop { background: rgba(0, 0, 0, .65); }
+#versionsDialog h2 { margin: 0 0 10px; font-size: 19px; }
+#versionsDialog .version { padding: 10px 0; border-top: 1px solid var(--edge); }
+#versionsDialog summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-height: 30px; cursor: pointer; }
+#versionsDialog summary .when, #versionsDialog summary .count { color: var(--dim); font-size: 13px; }
+#versionsDialog summary .what { flex: 1 1 100%; }
+#versionsDialog summary .mark { padding: 1px 8px; border: 1px solid var(--link); border-radius: 999px; color: var(--link); font-size: 12px; }
+#versionsDialog ul { margin: 8px 0 2px; padding-left: 20px; color: var(--dim); font-size: 14px; }
+#versionsDialog li { margin: 4px 0; }

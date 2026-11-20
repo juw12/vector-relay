@@ -449,6 +449,17 @@ def main() -> int:
             page.locator("#shade").tap(position={"x": 370, "y": 400})
             expect(page.locator("#chats")).to_be_hidden()
             check(True, "a tap beside the chat list closes it")
+            page.locator("#menu").tap()
+            page.locator("#showVersions").tap()
+            newest = page.locator("#versionsList details").first
+            expect(newest.locator("summary .mark")).to_have_text("this version")
+            folded = page.locator("#versionsList details:not([open])")
+            check(newest.locator("summary strong").inner_text() == relay.VERSION and newest.locator("li").first.is_visible()
+                  and folded.count() >= 4 and "change" in folded.first.locator("summary .count").inner_text(),
+                  "version history: the newest entry is open and marked as this version, older ones are folded to one line")
+            page.locator("#closeVersions").tap()
+            page.locator("#shade").tap(position={"x": 370, "y": 400})
+            expect(page.locator("#chats")).to_be_hidden()
 
             listener = listen(folder, atlas)
             expect(page.locator("#status")).to_have_text("Vector is waiting for your prompt", timeout=slow)

@@ -55,7 +55,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -68,10 +68,11 @@ DOCS = Path(__file__).resolve().parent / "docs"
 PAGE_FILES = {
     "": "index.html", "index.html": "index.html", "app.js": "app.js", "softcrypto.js": "softcrypto.js",
     "styles.css": "styles.css", "icon.svg": "icon.svg", "icon-180.png": "icon-180.png",
+    "versions.json": "versions.json",
 }
 PAGE_TYPES = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-    ".svg": "image/svg+xml", ".png": "image/png",
+    ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json; charset=utf-8",
 }
 MAX_ASK_BYTES = 1_200_000  # one sealed question from the phone, as the relay allows
 ANSWERS_KEPT, ANSWER_KEPT_S = 60, 300

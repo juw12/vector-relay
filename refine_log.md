@@ -83,6 +83,7 @@ right after 1.2.0 (a computer is added by typing 4 digits) was deployed.
 - [x] Gates G1-G6 on the new version
 - [x] Council score and side-by-side vote
 - [x] Ship: PR, merge, tag `v1.2.1`, deployed page, installed copy and skill on this PC
+- [x] Version history inside the phone page (1.2.2), asked for by the sync step
 - [x] Sync: profile README, portfolio card, landing page, Obsidian note and log
 
 ## Assumptions
@@ -136,6 +137,7 @@ Constants: MAX_ROUNDS 5, MIN_GAIN 0.3, DONE_SCORE 8.5.
 | v0 | 1.2.0 as pushed | G1-G3 pass (57 unit, 64 local, 61 live) | 8.0 (C1 7, C2 8, C3 10, C4 7) | - | baseline | council-judged (3 judges), totals 8.0-8.5, no split criterion |
 | 1 | 1.2.1: `pair --code` prints the code and one line, nothing else; `pair --no-code` takes a code back; a second computer waits up to 20 s for its turn instead of being refused; the phone names a newly added computer and the next step instead of a red error; README: numbered second-laptop steps for any system, a picture of the phone right after adding, a list of versions | G1-G6 pass | 9.45 (C1 9, C2 9, C3 10, C4 10) | 3-0 over v0 | yes | council-judged (3 judges), totals 9.25-9.5, no split criterion |
 | 2 | README now says things the app already did but the README left out, each found by a judge: what **Rename** does, what each other command does, what `pair --local` is, and the sentences the phone shows when a code is wrong, has run out or gets no answer | text only | not scored again | - | yes | - |
+| 3 | 1.2.2: a Version history button on the phone page (every version and what changed), fed by one list, `docs/versions.json`; `CHANGELOG.md` and the README's Versions part are made from it; a test fails when the version moves without a newest entry | G1-G5 pass (64 unit, 68 local, 65 live) | not judged (the sync step's version-history gate) | - | yes | `check_versions.py` 8 of 8 |
 
 Found by the checks, and fixed inside round 1:
 
@@ -154,7 +156,9 @@ Judge fixes not taken, and why:
   that path is the user's choice. Two lines to change, written in the README.
 - Time the second-laptop steps: needs the second laptop itself; listed under "not yet checked".
 
-stop: done. All six gates pass and the council score is 9.45, above DONE_SCORE 8.5.
+stop: done. All six gates pass and the council score is 9.45, above DONE_SCORE 8.5. Round 3 came from the sync
+step, which asks every app to show its version history inside the app; G6 was not run again for it (the pairing
+code did not change).
 
 Not checked: a real iPhone (WebKit on Windows stands in for it). The MacBook has not joined
 vector-relay.pages.dev yet.

@@ -139,12 +139,12 @@ the last chat leaves phone mode.
 
 ## Tests
 
-    python -m unittest discover -s tests   60 tests: seal, feed, inbox, chats, pictures, commands, whole trips,
-                                           local mode, the 4-digit code
+    python -m unittest discover -s tests   64 tests: seal, feed, inbox, chats, pictures, commands, whole trips,
+                                           local mode, the 4-digit code, the list of versions
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
-                                           (as a Pixel 7), relay rules in memory: 67 steps
+                                           (as a Pixel 7), relay rules in memory: 68 steps
     python scripts/e2e.py --live           the deployed page and relay, on throwaway channels that
-                                           are wiped at the end: 64 steps. The 8 local Wi-Fi steps
+                                           are wiped at the end: 65 steps. The 8 local Wi-Fi steps
                                            are left out (they use no relay), and 5 are added: a
                                            phone with no computer yet adds its first one by code,
                                            and the channel is wiped
@@ -156,16 +156,17 @@ second computer on the public relay (the Mac build was checked on a relay of its
 
 ## Versions
 
-- **1.2.1** `pair --code` prints the code alone, with no QR lines to read past. `pair --no-code`
-  takes a code back. A second computer gets its code right after the first one was used (it was
-  refused for 15 seconds before). Right after it is added, the phone names the new computer and
-  says the next step, where it showed an error until a chat was in phone mode. A computer whose
-  chats all left phone mode shows the same calm line instead of *Your PC does not answer*.
-- **1.2.0** Add a computer on the phone with a 4-digit code.
-- **1.1.0** Several computers on one phone page (the device picker), and a local Wi-Fi mode
-  that needs no relay.
-- **1.0.0** A relay and an address of its own, several chats at once, pictures both ways,
-  waiting all day.
+One list, `docs/versions.json`. The phone page shows it under **Version history** (at the foot of
+the chat list); `CHANGELOG.md` and the lines below are made from it by
+`python scripts/make_changelog.py`.
+
+<!-- versions:start -->
+- **1.2.2** (2026-11-20) Version history on the phone. The chat list on the phone has a Version history button: every version and what changed in it. One list of versions (docs/versions.json) now feeds the phone page, CHANGELOG.md and the README.
+- **1.2.1** (2026-11-20) The code alone, and the phone names the computer. `pair --code` prints the code alone, with no QR lines to read past. `pair --no-code` takes a code back. A second computer gets its code right after the first one was used (it was refused for 15 seconds before). Right after a computer is added, the phone names it and says the next step, where it showed an error until a chat was in phone mode. A computer whose chats all left phone mode shows the same calm line instead of "Your PC does not answer".
+- **1.2.0** (2026-11-20) Add a computer with a 4-digit code. Add a computer on the phone by typing 4 digits instead of scanning a QR code or pasting a link.
+- **1.1.0** (2026-11-20) Several computers on one phone. Several computers on one phone page (the device picker). A local Wi-Fi mode that needs no relay.
+- **1.0.0** (2026-11-19) First version under its own name. A relay and an address of its own. Several chats at once. Pictures both ways. A chat can wait for the next prompt all day.
+<!-- versions:end -->
 
 ## Files
 
@@ -176,5 +177,6 @@ second computer on the public relay (the Mac build was checked on a relay of its
 | `functions/c/[[path]].js`, `schema.sql`, `wrangler.toml` | The relay: a Pages Function and its D1 database. |
 | `skill/phone-relay/SKILL.md` | The `/phone` skill for the chat's agent. |
 | `tests/`, `scripts/e2e.py` | The checks above. |
+| `docs/versions.json`, `scripts/make_changelog.py`, `CHANGELOG.md` | The list of versions, and what is made from it. |
 
 MIT License.

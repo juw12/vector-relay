@@ -1,0 +1,57 @@
+{
+  "note": "The one list of versions. The phone page shows it under Version history; CHANGELOG.md and the Versions part of the README are made from it by scripts/make_changelog.py.",
+  "releases": [
+    {
+      "version": "1.2.2",
+      "date": "2026-11-20",
+      "pr": 3,
+      "title": "Version history on the phone",
+      "changes": [
+        "The chat list on the phone has a Version history button: every version and what changed in it.",
+        "One list of versions (docs/versions.json) now feeds the phone page, CHANGELOG.md and the README."
+      ]
+    },
+    {
+      "version": "1.2.1",
+      "date": "2026-11-20",
+      "pr": 2,
+      "title": "The code alone, and the phone names the computer",
+      "changes": [
+        "`pair --code` prints the code alone, with no QR lines to read past.",
+        "`pair --no-code` takes a code back.",
+        "A second computer gets its code right after the first one was used (it was refused for 15 seconds before).",
+        "Right after a computer is added, the phone names it and says the next step, where it showed an error until a chat was in phone mode.",
+        "A computer whose chats all left phone mode shows the same calm line instead of \"Your PC does not answer\"."
+      ]
+    },
+    {
+      "version": "1.2.0",
+      "date": "2026-11-20",
+      "pr": 1,
+      "title": "Add a computer with a 4-digit code",
+      "changes": [
+        "Add a computer on the phone by typing 4 digits instead of scanning a QR code or pasting a link."
+      ]
+    },
+    {
+      "version": "1.1.0",
+      "date": "2026-11-20",
+      "title": "Several computers on one phone",
+      "changes": [
+        "Several computers on one phone page (the device picker).",
+        "A local Wi-Fi mode that needs no relay."
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "date": "2026-11-19",
+      "title": "First version under its own name",
+      "changes": [
+        "A relay and an address of its own.",
+        "Several chats at once.",
+        "Pictures both ways.",
+        "A chat can wait for the next prompt all day."
+      ]
+    }
+  ]
+}
