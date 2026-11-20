@@ -37,6 +37,9 @@ When he types `/phone code`, or asks in this chat to add or link this computer o
 3. When he says it is done, `RELAY status`. Its `Code:` line says what became of the code
    ("a phone was linked with it", "it ran out", "answered wrong 3 times"). Make a new code only
    when he asks for one.
+4. A computer that was just added shows "The relay has nothing for this phone yet" on the phone
+   until one of its chats is in phone mode. Turn it on for this chat (Start, step 2) if he wants
+   to use it now.
 
 - `No code: another computer is showing a code`: only one computer at a time can show a code on
   a relay. Wait until that one is used or 5 minutes old, then try again.
