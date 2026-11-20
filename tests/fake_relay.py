@@ -99,7 +99,8 @@ class Handler(BaseHTTPRequestHandler):
         channel, what = parts[1], "/".join(parts[2:])
         if what == "asks/take" and method == "POST":
             until = self.held(TAKE_HOLD_S)
-            while time.time() < until and not relay.asks.get(channel) and not relay.closing:
+            # as on Cloudflare: a channel that is not there (any more) is answered at once
+            while time.time() < until and not relay.asks.get(channel) and channel in relay.owners and not relay.closing:
                 time.sleep(LOOK_S)
         if len(parts) == 4 and parts[2] == "answer" and method == "GET":
             until = self.held(ANSWER_HOLD_S)

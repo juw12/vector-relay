@@ -2,6 +2,8 @@
 
    Everything travels as AES-GCM ciphertext through a relay that cannot read it. The key came from
    the QR code on the PC, after the # of this page's address, which a browser sends to no server.
+   In local mode the PC itself is the relay and serves this page, for a phone on the same Wi-Fi.
+   A second computer can be added with a 4-digit code it shows, instead of its QR code.
 
    The phone asks the PC a question (route "feed", "prompt", "event" or "image") by leaving it at
    the relay and waiting there for the answer. When the PC does not answer, the last sealed copy
@@ -46,31 +48,73 @@
   function pause(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
 
   // ------------------------------------------------------------ the code from the PC
+  /* https anywhere; http only for the PC itself and its own network (a .local name or a private address). */
+  var NEAR = /^(https:\/\/[^\/\s]+|http:\/\/(127\.0\.0\.1|localhost|[A-Za-z0-9-]+\.local|10(\.\d{1,3}){3}|192\.168(\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(\.\d{1,3}){2})(:\d+)?)$/;
   function good(found) {
-    return found && /^(https:\/\/[^\/\s]+|http:\/\/(127\.0\.0\.1|localhost)(:\d+)?)$/.test(found.u) && found.c && found.k ? found : null;
+    if (!found || typeof found.u !== "string" || !NEAR.test(found.u) ||
+        !/^[A-Za-z0-9_-]{16,64}$/.test(found.c || "") || !/^[A-Za-z0-9_-]{43}$/.test(found.k || "")) return null;
+    try {
+      var origin = new URL(found.u);
+      if (origin.origin !== found.u || fromBase64(found.k).length !== 32) return null;
+    } catch (error) { return null; }
+    return { u: found.u, c: found.c, k: found.k };
   }
   var ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   var standalone = navigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
 
-  var link = (function () {
-    var found = /^#r=([A-Za-z0-9_-]+)$/.exec(location.hash), read = null, packed = "";
-    if (found) {
-      try { read = good(JSON.parse(new TextDecoder().decode(fromBase64(found[1])))); } catch (error) { read = null; }
-      if (read) { packed = found[1]; store.setItem(KEY, JSON.stringify(read)); }
+  var DEVICES = 'vrelay.devices.v1', ACTIVE = 'vrelay.device.active';
+  function readStore(key, fallback) {
+    try { return JSON.parse(store.getItem(key)) || fallback; }
+    catch (error) { return fallback; }
+  }
+  function decodeTicket(hash) {
+    var match = /^#r=([A-Za-z0-9_-]{1,4096})$/.exec(hash);
+    if (!match) return null;
+    try { return good(JSON.parse(new TextDecoder().decode(fromBase64(match[1])))); }
+    catch (error) { return null; }
+  }
+  function idOf(ticket) { return ticket.u + '/c/' + ticket.c; }
+  function ticketHash(ticket) {
+    return '#r=' + toBase64(new TextEncoder().encode(JSON.stringify(ticket)));
+  }
+  var devices = readStore(DEVICES, []);
+  devices = Array.isArray(devices) ? devices.filter(function (d) { return d && good(d.link) && typeof d.name === 'string'; }) : [];
+  function deviceById(id) { return devices.find(function (d) { return idOf(d.link) === id; }); }
+  function keepDevices() { store.setItem(DEVICES, JSON.stringify(devices)); }
+  function remember(ticket, alias) {
+    var entry = deviceById(idOf(ticket));
+    if (entry && entry.link.k !== ticket.k) return null;
+    if (!entry) {
+      entry = { link: ticket, name: 'Computer ' + (devices.length + 1), named: false };
+      devices.push(entry);
     }
-    if (!read) {
-      try { read = good(JSON.parse(store.getItem(KEY) || "null")); } catch (error) { read = null; }
-      if (read) packed = toBase64(new TextEncoder().encode(JSON.stringify(read)));
-    }
-    /* An iPhone Home Screen icon has its own storage and keeps only the address it was made from,
-       so in Safari on an iPhone the key stays in the address. Everywhere else it is taken out. */
-    try {
-      var here = location.pathname + location.search;
-      if (read && ios) history.replaceState(null, "", here + "#r=" + packed);
-      else if (found) history.replaceState(null, "", here);
-    } catch (error) { /* the page still works */ }
-    return read;
-  }());
+    if (alias) { entry.name = alias; entry.named = true; }
+    keepDevices();
+    return entry;
+  }
+  var legacy = good(readStore(KEY, null));
+  if (legacy) {
+    remember(legacy);
+    [CHAT, PENDING].forEach(function (key) {
+      var old = store.getItem(key), scoped = key + ':' + idOf(legacy);
+      if (old !== null && store.getItem(scoped) === null) store.setItem(scoped, old);
+      store.removeItem(key);
+    });
+    store.removeItem(KEY);
+  }
+  var incoming = decodeTicket(location.hash);
+  var active = deviceById(store.getItem(ACTIVE));
+  /* An installed iPhone app may reopen the URL used to create its icon. Its original
+     computer is only a bootstrap pairing, not a reason to undo an explicit device switch. */
+  if (incoming && !(standalone && active && deviceById(idOf(incoming)))) active = remember(incoming);
+  if (!active) active = devices[0] || null;
+  var link = active ? active.link : null;
+  if (active) {
+    store.setItem(ACTIVE, idOf(link));
+    CHAT += ':' + idOf(link);
+    PENDING += ':' + idOf(link);
+    history.replaceState(null, '', location.pathname + location.search + (ios ? ticketHash(link) : ''));
+  }
 
   // ------------------------------------------------------------ sealed questions and answers
   function trouble(kind, status) {
@@ -90,27 +134,42 @@
       function () { clearTimeout(timer); throw trouble("unreachable"); });
   }
 
-  var base = link ? link.u + "/c/" + link.c : "";
-  var keyPromise = link ? crypto.subtle.importKey("raw", fromBase64(link.k), "AES-GCM", false, ["encrypt", "decrypt"]) : null;
+  var local = !!link && link.u.indexOf("http://") === 0;   // the PC serves this page itself, over Wi-Fi
+  /* A browser lends its own AES only to pages that came over https. A page from the PC on the
+     Wi-Fi came over http, so there the sealing is done by softcrypto.js: same key, same layout. */
+  var subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
+  var keyPromise = null, soft = null;
+  if (link) {
+    try {
+      if (subtle) keyPromise = subtle.importKey("raw", fromBase64(link.k), "AES-GCM", false, ["encrypt", "decrypt"]);
+      else soft = window.softGcm(fromBase64(link.k));
+    } catch (error) { link = null; }   // a code with a broken key: the page says it is not linked
+  }
 
   function seal(data) {
     var iv = crypto.getRandomValues(new Uint8Array(12));
-    return keyPromise.then(function (key) {
-      return crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, key, new TextEncoder().encode(JSON.stringify(data)));
-    }).then(function (sealed) {
-      var all = new Uint8Array(12 + sealed.byteLength);
+    var plain = new TextEncoder().encode(JSON.stringify(data));
+    var made = soft
+      ? new Promise(function (resolve) { resolve(soft.seal(iv, plain)); })
+      : keyPromise.then(function (key) { return subtle.encrypt({ name: "AES-GCM", iv: iv }, key, plain); })
+        .then(function (sealed) { return new Uint8Array(sealed); });
+    return made.then(function (sealed) {
+      var all = new Uint8Array(12 + sealed.length);
       all.set(iv, 0);
-      all.set(new Uint8Array(sealed), 12);
+      all.set(sealed, 12);
       return toBase64(all);
     });
   }
   function unseal(text) {
     var raw = fromBase64(text.trim());
-    return keyPromise.then(function (key) {
-      return crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, key, raw.slice(12));
-    }).then(function (plain) { return JSON.parse(new TextDecoder().decode(plain)); },
+    var opened = soft
+      ? new Promise(function (resolve) { resolve(soft.open(raw.subarray(0, 12), raw.subarray(12))); })
+      : keyPromise.then(function (key) { return subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, key, raw.slice(12)); });
+    return opened.then(function (plain) { return JSON.parse(new TextDecoder().decode(plain)); },
       function () { throw trouble("unreadable"); });
   }
+
+  var base = link ? link.u + "/c/" + link.c : "";
 
   /* Leaves a sealed question for the PC and waits for the answer until waitMs have passed.
      The relay holds each request for the answer a few seconds, so one request is usually enough. */
@@ -186,6 +245,14 @@
 
   function merge(answer, live) {
     if (!answer || !Array.isArray(answer.events)) return;
+    if (live && active && !active.named && typeof answer.deviceName === 'string' && answer.deviceName.trim()) {
+      var reported = answer.deviceName.trim().slice(0, 40);
+      if (active.name !== reported) {
+        active.name = reported;
+        keepDevices();
+        deviceLabels();
+      }
+    }
     if (live && answer.last < lastN) { events = []; lastN = 0; }   // the feed on the PC was cleared
     var before = events.length ? events[events.length - 1].n : 0;
     var byNumber = {};
@@ -301,12 +368,12 @@
   function status() {
     var own = chat(selected), seen = visible();
     var last = seen.length ? seen[seen.length - 1] : null;
-    if (problem) return ["bad", problem, true];
-    if (!info.pc) return ["", "Asking your PC", true];
+    if (problem) return ["bad", problem, !!own && own.on];
+    if (!info.pc) return ["", "Asking your PC", false];
     if (!own) return ["", "No chat is in phone mode. On the PC, type /phone in a chat.", false];
     if (!own.on) {
       var others = info.chats.some(function (c) { return c.on; });
-      return ["", "This chat left phone mode." + (others ? " Pick another one above." : " On the PC, type /phone in a chat."), false];
+      return ["", "This chat left phone mode." + (others ? " Pick another one from the chat list." : " On the PC, type /phone in a chat."), false];
     }
     if (own.listening) return ["ok", "Vector is waiting for your prompt", true];
     if (last && Date.now() / 1000 - last.t > SILENT_S) return ["bad", "No word from the chat since " + clock(last.t) + ". It may have stopped: look at the PC.", true];
@@ -380,25 +447,65 @@
     return item;
   }
 
+  /* "now", "4m", "2h", "3d": how long ago, the way the chat list in the app says it. */
+  function since(seconds) {
+    var passed = Math.max(0, Date.now() / 1000 - seconds);
+    if (passed < 60) return "now";
+    if (passed < 3600) return Math.floor(passed / 60) + "m";
+    if (passed < 86400) return Math.floor(passed / 3600) + "h";
+    return Math.floor(passed / 86400) + "d";
+  }
+
+  /* When each chat last said or heard something. */
+  function lastWord(c) {
+    var last = c.since || 0;
+    events.forEach(function (event) { if (event.chat === c.id && event.t > last) last = event.t; });
+    return last;
+  }
+
+  var listed = "";
   function chips() {
-    var bar = $("chats");
-    bar.hidden = info.chats.length < 2;
+    var bar = $("chats"), wanted = $("find").value.trim().toLowerCase();
+    var rows = info.chats.map(function (c) {
+      return { c: c, name: chatName(c), when: since(lastWord(c)), last: lastWord(c) };
+    }).sort(function (a, b) { return b.last - a.last; });
+    var found = rows.filter(function (row) { return !wanted || row.name.toLowerCase().indexOf(wanted) >= 0; });
+    var some = Object.keys(unread).some(function (id) { return unread[id] && id !== selected; });
+    $("menuNew").hidden = !some;
+    $("noChats").hidden = found.length > 0;
+    $("noChats").textContent = rows.length ? "No chat with that name." : "No chat is in phone mode yet. On the PC, type /phone in a chat.";
+    var mark = JSON.stringify([selected, unread, found.map(function (row) { return [row.c.id, row.name, row.when, row.c.on, row.c.listening]; })]);
+    if (mark === listed) return;   // rows are not made again under a finger
+    listed = mark;
     bar.textContent = "";
-    if (bar.hidden) return;
-    info.chats.forEach(function (c) {
-      var chip = element("button", "chip" + (c.id === selected ? " chosen" : ""));
+    found.forEach(function (row) {
+      var c = row.c;
+      var chip = element("button", "chip" + (c.id === selected ? " chosen" : "") + (c.on ? "" : " away"));
       chip.type = "button";
       chip.setAttribute("aria-pressed", c.id === selected ? "true" : "false");
-      chip.appendChild(element("span", "dot " + (c.listening ? "ok" : c.on ? "busy" : "")));
-      chip.appendChild(element("span", "name", chatName(c)));
+      chip.appendChild(element("span", "name", row.name));
+      if (c.on && !c.listening) {
+        var spin = element("span", "spin");
+        spin.title = "Working";
+        chip.appendChild(spin);
+      }
       if (unread[c.id]) {
         var fresh = element("span", "new");
         fresh.title = "Something new";
         chip.appendChild(fresh);
       }
-      chip.onclick = function () { select(c.id); };
+      chip.appendChild(element("span", "when", row.when));
+      chip.onclick = function () { select(c.id); side(false); };
       bar.appendChild(chip);
     });
+  }
+
+  /* The chat list slides in over the feed on a phone; on a wide screen it is always there. */
+  function side(open) {
+    document.body.classList.toggle("side-open", open);
+    $("shade").hidden = !open;
+    $("menu").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) chips();
   }
 
   function render() {
@@ -411,12 +518,13 @@
     })]);
     $("dot").className = "dot " + found[0];
     $("status").textContent = found[1];
-    $("label").textContent = own && info.chats.length < 2 && own.label ? "· " + own.label : "";
+    $("title").textContent = own ? chatName(own) : "Vector Relay";
+    document.title = own ? chatName(own) : "Vector Relay";
     $("send").disabled = !found[2];
-    $("box").placeholder = found[2] ? "Prompt for " + (own && info.chats.length > 1 ? chatName(own) : "Vector") : "No chat to send to";
+    $("box").placeholder = found[2] ? "Send follow-up" : "No chat to send to";
+    chips();
     if (mark === shown) return;
     shown = mark;
-    chips();
     var feed = $("feed");
     var atEnd = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
     feed.textContent = "";
@@ -474,7 +582,11 @@
     if (error.kind === "unreadable") return "The key on this phone does not open what the PC sends. Scan a new code on the PC.";
     var reply;
     try { reply = await reach(base + "/state", { cache: "no-store" }, HANG_MS); }
-    catch (failure) { return "This phone cannot reach the relay. Check its internet, or switch between Wi-Fi and mobile data."; }
+    catch (failure) {
+      if (local) return "This phone cannot reach your PC. Is the PC on and awake, with a chat in phone mode, and is this phone on the same Wi-Fi?";
+      return "This phone cannot reach the relay. Check its internet, or switch between Wi-Fi and mobile data.";
+    }
+    if (reply.status === 404 && local) return "Your PC does not know this phone's code any more. Make a new code on the PC and scan it.";
     if (reply.status === 404) return "The relay has nothing for this phone yet. On the PC, type /phone in a chat. If that does not help, make a new code there and scan it.";
     if (!reply.ok) return "The relay answered with an error (" + reply.status + "). Try again in a minute.";
     try { merge(await unseal(await reply.text()), false); }
@@ -511,7 +623,7 @@
     bad: "The PC refused it: empty or too long.",
     key: "The key on this phone is not the PC's. Scan a new code.",
     off: "That chat is not in phone mode, so nothing would pick it up.",
-    chat: "Several chats are in phone mode. Pick one above, then try again.",
+    chat: "Several chats are in phone mode. Pick one from the chat list, then try again.",
     photo: "The PC could not read the photo."
   };
 
@@ -576,15 +688,258 @@
     $("photo").value = "";
   }
 
+  // ------------------------------------------------------------ a 4-digit code instead of the QR code
+  /* The computer shows 4 digits. It and this phone each turn them into a number, raise it to a
+     secret of their own and swap the results (SPEKE, in the 2048-bit group of RFC 3526). Only two
+     sides that started from the same digits end with the same key, and what crosses the relay says
+     nothing about the digits: a guess has to be sent to the computer, which takes three. The
+     pairing link then arrives sealed with the key the two just made.
+     The swap happens in a "room": a channel of the relay named by the time alone. */
+  var CODE_PRIME =
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DD" +
+    "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED" +
+    "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F" +
+    "83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B" +
+    "E39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA0510" +
+    "15728E5A8AACAA68FFFFFFFFFFFFFFFF";
+  var ROOM_EVERY_MS = 5 * 60 * 1000, ROOM_HANG_MS = 6000, CODE_WAIT_MS = 25000;
+  var canCode = !!subtle && typeof BigInt === "function";   // not on a page that came over plain http from the PC
+
+  function bytesOf(text) { return new TextEncoder().encode(text); }
+  function joined(parts) {
+    var all = new Uint8Array(parts.reduce(function (sum, part) { return sum + part.length; }, 0)), at = 0;
+    parts.forEach(function (part) { all.set(part, at); at += part.length; });
+    return all;
+  }
+  function digest(bytes) {
+    return subtle.digest("SHA-256", bytes).then(function (made) { return new Uint8Array(made); });
+  }
+  function signed(key, text) {
+    return subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+      .then(function (made) { return subtle.sign("HMAC", made, bytesOf(text)); })
+      .then(function (made) { return new Uint8Array(made); });
+  }
+  function numberOf(bytes) {
+    var hex = "0";
+    for (var i = 0; i < bytes.length; i += 1) hex += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+    return BigInt("0x" + hex);
+  }
+  function wide(number) {   // 256 bytes, the highest first
+    var hex = number.toString(16), bytes = new Uint8Array(256);
+    hex = new Array(513 - hex.length).join("0") + hex;
+    for (var i = 0; i < 256; i += 1) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return bytes;
+  }
+  function power(base, exponent, modulus) {
+    var result = BigInt(1), none = BigInt(0), one = BigInt(1);
+    base %= modulus;
+    while (exponent > none) {
+      if (exponent & one) result = result * base % modulus;
+      base = base * base % modulus;
+      exponent >>= one;
+    }
+    return result;
+  }
+  async function codeBase(code, prime) {
+    var parts = [];
+    for (var count = 0; count < 10; count += 1) {
+      parts.push(await digest(joined([bytesOf("vector-relay pair v1|" + code), new Uint8Array([count])])));
+    }
+    var number = numberOf(joined(parts)) % prime;
+    return number * number % prime;
+  }
+
+  /* The room a computer holds at this address for this stretch of time, or null. */
+  async function lookRoom(origin, stretch) {
+    var named = await digest(bytesOf("vector-relay pair room v1|" + stretch));
+    var room = origin + "/c/pair" + toBase64(named).slice(0, 28);
+    var reply = await reach(room + "/state", { cache: "no-store" }, ROOM_HANG_MS);
+    if (reply.status !== 200) return null;
+    try {
+      var found = JSON.parse(await reply.text());
+      return found.v === 1 && typeof found.a === "string" && typeof found.t === "number" ? { base: room, a: found.a, t: found.t } : null;
+    } catch (error) { return null; }
+  }
+
+  /* The pairing link of the computer that shows this code. Throws trouble("no-code", "wrong", "silent" or "unreachable"). */
+  async function linkByCode(code) {
+    var origins = [location.origin], stretch = Math.floor(Date.now() / ROOM_EVERY_MS), looks = [];
+    if (link && link.u !== location.origin) origins.push(link.u);   // a page that is not at its relay's address
+    origins.forEach(function (origin) {   // a code lives 5 minutes, and the two clocks may differ by a few more
+      for (var step = -2; step <= 1; step += 1) looks.push(lookRoom(origin, stretch + step).catch(function () { return false; }));
+    });
+    var found = await Promise.all(looks);
+    var rooms = found.filter(Boolean).sort(function (a, b) { return b.t - a.t; });
+    if (!rooms.length) throw trouble(found.every(function (room) { return room === false; }) ? "unreachable" : "no-code");
+    var room = rooms[0], prime = BigInt("0x" + CODE_PRIME), one = BigInt(1);
+    var theirs = numberOf(fromBase64(room.a));
+    if (theirs <= one || theirs >= prime - one) throw trouble("no-code");
+    var secret = numberOf(crypto.getRandomValues(new Uint8Array(32))) + BigInt(2);
+    var mine = power(await codeBase(code, prime), secret, prime);
+    var shared = power(theirs * theirs % prime, secret, prime);
+    var key = await digest(joined([bytesOf("vector-relay pair v1 key|"), wide(theirs), wide(mine), wide(shared)]));
+    var proof = await signed(key, "proof"), sealKey = await signed(key, "seal");
+    var id = randomId();
+    var reply = await reach(room.base + "/ask/" + id, {
+      method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ b: toBase64(wide(mine)), m: toBase64(proof) }),
+    }, HANG_MS);
+    if (!reply.ok) throw trouble(reply.status === 404 ? "no-code" : "silent");
+    var started = Date.now();
+    while (Date.now() - started < CODE_WAIT_MS) {
+      var asked = Date.now();
+      reply = await reach(room.base + "/answer/" + id + "?wait=" + ANSWER_HOLD_S, { cache: "no-store" }, ANSWER_HANG_MS);
+      if (reply.status === 200) {
+        var answer = JSON.parse(await reply.text());
+        if (!answer.ok) {
+          var wrong = trouble("wrong");
+          wrong.left = answer.left;
+          throw wrong;
+        }
+        var raw = fromBase64(answer.link);
+        var opener = await subtle.importKey("raw", sealKey, "AES-GCM", false, ["decrypt"]);
+        var plain = await subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, opener, raw.slice(12));
+        return JSON.parse(new TextDecoder().decode(plain)).link;
+      }
+      if (reply.status !== 204) throw trouble("silent");
+      if (Date.now() - asked < 1000) await pause(400);   // this relay did not hold the request
+    }
+    throw trouble("silent");
+  }
+  function codeWhy(error) {
+    if (navigator.onLine === false || error.kind === "unreachable") return "This phone cannot reach the relay. Check its internet, then try again.";
+    if (error.kind === "no-code") return "No computer is showing a code right now. On that computer, type /phone code in a chat, then enter its 4 digits here.";
+    if (error.kind === "wrong" && error.left > 0) return "That is not the code. Check the 4 digits on the computer and try again.";
+    if (error.kind === "wrong") return "That is not the code, and it has stopped working now. Make a new code on the computer.";
+    return "The computer did not answer. Make a new code on it and try again.";
+  }
+
   // ------------------------------------------------------------ start
+  function deviceLabels() {
+    if (!active) return;
+    var picker = $('devicePicker');
+    picker.replaceChildren();
+    devices.forEach(function (d) {
+      var option = element('option', '', d.name);
+      option.value = idOf(d.link);
+      picker.appendChild(option);
+    });
+    picker.value = idOf(active.link);
+    $('deviceControls').hidden = false;
+    $('sendTarget').textContent = 'To: ' + active.name;
+    $('send').setAttribute('aria-label', 'Send to ' + active.name);
+  }
+  function switchDevice(next) {
+    if (!next) return;
+    if (active && idOf(next.link) === idOf(active.link)) { deviceLabels(); return; }
+    if (active && pending.some(function (p) { return p.state === 'sending'; })) {
+      window.alert('A prompt is still sending. Switch devices after it finishes.');
+      deviceLabels();
+      return;
+    }
+    if (active && ($('box').value.trim() || photo) && !window.confirm('Discard the unsent draft and switch devices?')) {
+      deviceLabels();
+      return;
+    }
+    store.setItem(ACTIVE, idOf(next.link));
+    $('send').disabled = true;
+    history.replaceState(null, '', location.pathname + location.search + ticketHash(next.link));
+    // Reset the entire feed, timers, listeners, image caches and composer together.
+    location.reload();
+  }
+  var renaming = false;
+  var byCode = canCode;   // which of the two ways the dialog shows
+  var brought = null;     // {code, ticket}: what a code brought, kept in case only the name has to change
+  var linking = false;
+  function showWay(code) {
+    byCode = code && canCode;
+    $('codeFields').hidden = !byCode;
+    $('linkFields').hidden = byCode;
+    $('useCode').hidden = !canCode;
+    $('deviceError').hidden = true;
+  }
+  function editDevice(rename) {
+    renaming = rename;
+    $('deviceDialogTitle').textContent = rename ? 'Rename device' : 'Add device';
+    $('deviceName').value = rename && active ? active.name : '';
+    $('deviceLink').value = $('deviceCode').value = '';
+    brought = null;
+    showWay(true);
+    $('pairFields').hidden = rename;
+    $('deviceError').hidden = true;
+    $('saveDevice').textContent = rename ? 'Save name' : 'Add and switch';
+    $('deviceDialog').showModal();
+  }
+  function formError(message) {
+    $('deviceError').textContent = message;
+    $('deviceError').hidden = false;
+  }
+  $('devicePicker').onchange = function () { switchDevice(deviceById(this.value)); };
+  $('addDevice').onclick = $('firstDevice').onclick = function () { editDevice(false); };
+  $('renameDevice').onclick = function () { editDevice(true); };
+  $('cancelDevice').onclick = function () { $('deviceDialog').close(); };
+  $('useLink').onclick = function () { showWay(false); };
+  $('useCode').onclick = function () { showWay(true); };
+  $('deviceDialog').onclose = function () { $('deviceLink').value = $('deviceCode').value = ''; brought = null; };
+  $('deviceForm').onsubmit = async function (event) {
+    event.preventDefault();
+    if (linking) return;
+    var name = $('deviceName').value.trim();
+    if (!name) return formError('Enter a name for this computer.');
+    var ticket = renaming && active ? active.link : null;
+    if (!renaming && byCode) {
+      var code = $('deviceCode').value.trim(), why = '';
+      if (!/^[0-9]{4}$/.test(code)) return formError('Type the 4 digits that computer shows.');
+      if (!brought || brought.code !== code) {
+        linking = true;
+        $('saveDevice').disabled = true;
+        $('saveDevice').textContent = 'Linking…';
+        $('deviceError').hidden = true;
+        try {
+          brought = { code: code, ticket: decodeTicket(new URL(await linkByCode(code)).hash) };
+          if (!brought.ticket) throw trouble('silent');
+        } catch (error) {
+          brought = null;
+          why = codeWhy(error);
+        }
+        linking = false;
+        $('saveDevice').disabled = false;
+        $('saveDevice').textContent = 'Add and switch';
+        if (!$('deviceDialog').open) { brought = null; return; }   // cancelled while the computer was asked
+        if (why) return formError(why);
+      }
+      ticket = brought.ticket;
+    } else if (!renaming) {
+      try { ticket = decodeTicket(new URL($('deviceLink').value.trim()).hash); } catch (error) { ticket = null; }
+      if (!ticket) return formError('That is not a Vector Relay pairing link. Copy the complete link from the QR.');
+    }
+    if (!renaming && ticket && location.protocol === 'https:' && !ticket.u.startsWith('https:')) return formError('This is a local-only pairing. Use a Cloudflare pairing QR for access on cellular.');
+    if (!ticket) return;
+    if (devices.some(function (d) { return idOf(d.link) !== idOf(ticket) && d.name.toLowerCase() === name.toLowerCase(); })) {
+      return formError('Use a distinct name so you can tell the computers apart.');
+    }
+    var next = remember(ticket, name);
+    if (!next) return formError('This pairing conflicts with a saved key. Pair the other computer on its own new channel.');
+    $('deviceDialog').close();
+    switchDevice(next);
+  };
+  window.addEventListener('hashchange', function () {
+    var ticket = decodeTicket(location.hash);
+    if (ticket) switchDevice(remember(ticket));
+  });
+  deviceLabels();
   if (!link) {
     $("none").hidden = false;
     $("feed").hidden = true;
+    $("menu").hidden = true;
     $("dot").className = "dot";
     $("status").textContent = "Not linked";
     return;
   }
   $("composer").hidden = false;
+  $("menu").addEventListener("click", function () { side(!document.body.classList.contains("side-open")); });
+  $("shade").addEventListener("click", function () { side(false); });
+  $("find").addEventListener("input", chips);
+  document.addEventListener("keydown", function (event) { if (event.key === "Escape") side(false); });
   var box = $("box");
   function fit() {
     box.style.height = "auto";

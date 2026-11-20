@@ -4,62 +4,121 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Vector Relay</title>
-<meta name="description" content="See and steer the AI chats on your own PC from your phone, through a relay that only holds ciphertext.">
+<meta name="description" content="See and steer the AI chats on your own PC from your phone. Everything is sealed with a key only your PC and your phone have.">
 <meta name="robots" content="noindex">
 <meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#2f5b8c" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#201f1c" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#1a1a1a">
+<meta name="color-scheme" content="dark">
 <!-- No manifest, on purpose: without one an iPhone keeps this page's whole address, the key after
      the # included, as what the Home Screen icon opens. An icon has its own storage, so the
      address is the only way the key gets there. -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Vector Relay">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=1.0.0">
+<link rel="stylesheet" href="styles.css?v=1.3.0">
 </head>
 <body>
-<header class="bar">
-  <h1 class="brand"><img src="icon.svg" alt="" width="24" height="24">Vector Relay<span id="label" class="label"></span></h1>
-  <p class="status" role="status"><span id="dot" class="dot"></span><span id="status">Opening</span></p>
-</header>
-
-<nav id="chats" class="chats" aria-label="Chats in phone mode" hidden></nav>
-
-<main id="feed" class="feed" aria-live="polite" aria-label="What the chat on your PC said"></main>
-
-<section id="none" class="sheet" hidden>
-  <h2>This phone is not linked yet</h2>
-  <p>Vector Relay shows the AI chats that run on your own PC, and takes your next prompt to them.</p>
-  <ol>
-    <li>On the PC, type <strong>/phone</strong> in a chat.</li>
-    <li>Scan the QR code it shows with this phone's camera.</li>
-  </ol>
-  <p class="soft">The code holds a key that only your PC and this phone have. The relay in between passes sealed text it cannot read. Your phone needs the internet, not the same Wi-Fi as the PC.</p>
-</section>
-
-<aside id="hint" class="hint" hidden>
-  <p><strong>Keep it as an app:</strong> tap Share, then <strong>Add to Home Screen</strong>. The icon takes your key along, so do not share this page's address.</p>
-  <button id="hintClose" type="button">OK</button>
+<aside id="side" class="side" aria-label="Chats">
+  <div class="device-controls" id="deviceControls" hidden>
+    <label for="devicePicker">Device</label>
+    <select id="devicePicker" aria-label="Device to control"></select>
+    <div class="device-actions">
+      <button type="button" id="addDevice">+ Add device</button>
+      <button type="button" id="renameDevice">Rename</button>
+    </div>
+  </div>
+  <label class="search">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <span class="hidden">Search chats</span>
+    <input id="find" type="search" placeholder="Search chats" autocomplete="off" autocapitalize="off" spellcheck="false">
+  </label>
+  <nav id="chats" class="chats" aria-label="Chats in phone mode"></nav>
+  <p id="noChats" class="side-empty">No chat is in phone mode yet. On the PC, type /phone in a chat.</p>
 </aside>
+<div id="shade" class="shade" hidden></div>
+<dialog id="deviceDialog" aria-labelledby="deviceDialogTitle">
+  <form id="deviceForm" autocomplete="off">
+    <h2 id="deviceDialogTitle">Add device</h2>
+    <label for="deviceName">Device name</label>
+    <input id="deviceName" required maxlength="40" placeholder="e.g. ASUS laptop">
+    <div id="pairFields">
+      <div id="codeFields">
+        <label for="deviceCode">4-digit code from that computer</label>
+        <input id="deviceCode" class="code" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="0000">
+        <p>On that computer, type <strong>/phone code</strong> in a chat. It shows 4 digits that work for 5 minutes.</p>
+        <button type="button" id="useLink" class="other-way">Use a pairing link instead</button>
+      </div>
+      <div id="linkFields" hidden>
+        <label for="deviceLink">Private pairing link</label>
+        <input id="deviceLink" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste pairing link">
+        <p>Point your iPhone Camera at the other computer’s Vector Relay QR and copy its link. Paste it here, not in a chat.</p>
+        <button type="button" id="useCode" class="other-way">Use a 4-digit code instead</button>
+      </div>
+    </div>
+    <p id="deviceError" role="alert" hidden></p>
+    <div class="device-actions"><button type="button" id="cancelDevice">Cancel</button><button type="submit" id="saveDevice">Add and switch</button></div>
+  </form>
+</dialog>
 
-<div id="preview" class="preview" hidden>
-  <img id="previewPicture" alt="The photo you are about to send">
-  <button id="previewRemove" type="button">Remove photo</button>
+<div class="main">
+  <header class="bar">
+    <button id="menu" class="menu" type="button" aria-label="Chats" aria-controls="side" aria-expanded="false">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.5 4.5v15" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+      <span id="menuNew" class="new" hidden></span>
+    </button>
+    <div class="titles">
+      <h1 id="title" class="brand">Vector Relay</h1>
+      <p class="status" role="status"><span id="dot" class="dot"></span><span id="status">Opening</span></p>
+    </div>
+  </header>
+
+  <main id="feed" class="feed" aria-live="polite" aria-label="What the chat on your PC said"></main>
+
+  <section id="none" class="sheet" hidden>
+    <h2>This phone is not linked yet</h2>
+    <p>Vector Relay shows the AI chats that run on your own PC, and takes your next prompt to them.</p>
+    <ol>
+      <li>On the PC, type <strong>/phone</strong> in a chat.</li>
+      <li>Scan the QR code it shows with this phone's camera.</li>
+    </ol>
+    <p>No camera at hand? Type <strong>/phone code</strong> instead, tap the button below and enter the 4 digits.</p>
+    <p class="soft">The code holds a key that only your PC and this phone have. Everything between them travels sealed with it.</p>
+    <button type="button" id="firstDevice">Add device with a code</button>
+  </section>
+
+  <aside id="hint" class="hint" hidden>
+    <p><strong>Keep it as an app:</strong> tap Share, then <strong>Add to Home Screen</strong>. The icon takes your key along, so do not share this page's address.</p>
+    <button id="hintClose" type="button">OK</button>
+  </aside>
+
+  <div id="preview" class="preview" hidden>
+    <img id="previewPicture" alt="The photo you are about to send">
+    <button id="previewRemove" type="button">Remove photo</button>
+  </div>
+
+  <form id="composer" class="composer" hidden>
+    <div class="compose">
+      <input id="photo" type="file" accept="image/*" hidden>
+      <label class="hidden" for="box">Prompt for the chat on your PC</label>
+      <textarea id="box" rows="1" placeholder="Send follow-up" autocomplete="off"></textarea>
+      <div class="tools">
+        <button id="attach" class="attach" type="button" aria-label="Add a photo">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+        </button>
+        <span id="sendTarget" class="send-target" aria-live="polite"></span>
+        <button id="send" class="send" type="submit" aria-label="Send" disabled>
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 18.5v-13M6.5 11L12 5.5 17.5 11" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </div>
+  </form>
 </div>
 
-<form id="composer" class="composer" hidden>
-  <input id="photo" type="file" accept="image/*" hidden>
-  <button id="attach" class="attach" type="button" aria-label="Add a photo">
-    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 8h3l1.5-2h7L17 8h3v11H4zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/></svg>
-  </button>
-  <label class="hidden" for="box">Prompt for the chat on your PC</label>
-  <textarea id="box" rows="1" placeholder="Prompt for Vector" autocomplete="off"></textarea>
-  <button id="send" class="send" type="submit">Send</button>
-</form>
-
 <noscript><p class="sheet">This page needs JavaScript: it opens the sealed text from your PC on this phone.</p></noscript>
-<script src="app.js?v=1.0.0"></script>
+<script src="softcrypto.js?v=1.1.0"></script>
+<script src="app.js?v=1.3.0"></script>
 </body>
 </html>
