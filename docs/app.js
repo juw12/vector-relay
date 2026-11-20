@@ -10,6 +10,8 @@
    the relay keeps is shown instead, with what stands in the way written in the bar. */
 (function () {
   "use strict";
+
+  var APP_VERSION = "1.2.2";  // the newest entry in versions.json; a test keeps the two in step
   var KEY = "vrelay.link", PENDING = "vrelay.pending", HINT = "vrelay.hint", CHAT = "vrelay.chat";
   var HANG_MS = 10000;          // a request with no reply for this long is dropped
   var ANSWER_HOLD_S = 8;        // the relay holds the request for the answer this long
@@ -879,6 +881,42 @@
   $('addDevice').onclick = $('firstDevice').onclick = function () { editDevice(false); };
   $('renameDevice').onclick = function () { editDevice(true); };
   $('cancelDevice').onclick = function () { $('deviceDialog').close(); };
+
+  // ------------------------------------------------------------ version history
+  /* The list lives in versions.json, the one place versions are written down. */
+  function showVersions(releases) {
+    var list = $('versionsList');
+    list.replaceChildren();
+    if (!releases || !releases.length) {
+      list.appendChild(element('p', '', 'The list did not load. Check the internet on this phone, then try again.'));
+      return;
+    }
+    releases.forEach(function (release, at) {
+      var running = release.version === APP_VERSION;
+      var entry = element('details', running ? 'version running' : 'version');
+      entry.open = running || (at === 0 && !releases.some(function (r) { return r.version === APP_VERSION; }));
+      var count = release.changes.length + (release.changes.length === 1 ? ' change' : ' changes');
+      var head = element('summary');
+      head.appendChild(element('strong', '', release.version));
+      head.appendChild(element('span', 'when', release.date));
+      head.appendChild(element('span', 'what', release.title));
+      head.appendChild(element('span', running ? 'mark' : 'count', running ? 'this version' : count));
+      entry.appendChild(head);
+      var changes = element('ul');
+      release.changes.forEach(function (change) { changes.appendChild(element('li', '', change.replace(/`/g, ''))); });
+      entry.appendChild(changes);
+      list.appendChild(entry);
+    });
+  }
+  $('showVersions').onclick = function () {
+    $('versionsList').replaceChildren(element('p', '', 'Loading'));
+    $('versionsDialog').showModal();
+    fetch('versions.json?v=' + APP_VERSION, { cache: 'no-cache' })
+      .then(function (reply) { return reply.ok ? reply.json() : null; })
+      .then(function (data) { showVersions(data && data.releases); })
+      .catch(function () { showVersions(null); });
+  };
+  $('closeVersions').onclick = function () { $('versionsDialog').close(); };
   $('useLink').onclick = function () { showWay(false); };
   $('useCode').onclick = function () { showWay(true); };
   $('deviceDialog').onclose = function () { $('deviceLink').value = $('deviceCode').value = ''; brought = null; };
