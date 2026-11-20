@@ -128,9 +128,9 @@ the last chat leaves phone mode.
     python -m unittest discover -s tests   60 tests: seal, feed, inbox, chats, pictures, commands, whole trips,
                                            local mode, the 4-digit code
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
-                                           (as a Pixel 7), relay rules in memory: 66 steps
+                                           (as a Pixel 7), relay rules in memory: 67 steps
     python scripts/e2e.py --live           the deployed page and relay, on throwaway channels that
-                                           are wiped at the end: 63 steps. The 8 local Wi-Fi steps
+                                           are wiped at the end: 64 steps. The 8 local Wi-Fi steps
                                            are left out (they use no relay), and 5 are added: a
                                            phone with no computer yet adds its first one by code,
                                            and the channel is wiped

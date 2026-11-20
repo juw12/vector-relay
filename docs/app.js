@@ -373,7 +373,8 @@
     if (!own) return ["", active ? "No chat on " + active.name + " is in phone mode. On that computer, type /phone in a chat." : "No chat is in phone mode. On the PC, type /phone in a chat.", false];
     if (!own.on) {
       var others = info.chats.some(function (c) { return c.on; });
-      return ["", "This chat left phone mode." + (others ? " Pick another one from the chat list." : " On the PC, type /phone in a chat."), false];
+      var nobody = active ? " No chat on " + active.name + " is in phone mode now: on that computer, type /phone in a chat." : " On the PC, type /phone in a chat.";
+      return ["", "This chat left phone mode." + (others ? " Pick another one from the chat list." : nobody), false];
     }
     if (own.listening) return ["ok", "Vector is waiting for your prompt", true];
     if (last && Date.now() / 1000 - last.t > SILENT_S) return ["bad", "No word from the chat since " + clock(last.t) + ". It may have stopped: look at the PC.", true];

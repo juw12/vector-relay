@@ -346,6 +346,13 @@ def code_trip(page, expect, root: Path, relay_address: str, base: str, hosts: li
     check('bad' not in (page.locator('#dot').get_attribute('class') or ''),
           'code: a computer with no chat in phone mode yet is named on the phone with the next step, and no error')
     page.screenshot(path=str(REPO / 'shots' / 'phone-added.png'))
+    assert run(spare, 'on', '--label', 'Spare chat').returncode == 0
+    expect(page.locator('#status')).to_contain_text('Vector is', timeout=45_000)
+    assert run(spare, 'off').returncode == 0
+    expect(page.locator('#status')).to_contain_text(
+        'This chat left phone mode. No chat on Spare PC is in phone mode now: on that computer, type /phone in a chat.', timeout=45_000)
+    check('bad' not in (page.locator('#dot').get_attribute('class') or ''),
+          'code: when its last chat leaves phone mode, the phone still names the computer and the next step')
 
 
 def first_by_code(webkit, iphone, expect, folder: Path, page_address: str, slow: int) -> None:
