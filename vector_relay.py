@@ -64,7 +64,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -363,6 +363,25 @@ def add_event(folder: Path, kind: str, text: str, source: str = "pc", **more) ->
     return event
 
 
+_named: list[str] = []  # this computer's name, asked for once
+
+
+def device_name() -> str:
+    """What this computer is called on the page until it is given a name there."""
+    if os.environ.get("VECTOR_RELAY_DEVICE_NAME"):
+        return os.environ["VECTOR_RELAY_DEVICE_NAME"][:40]
+    if not _named:
+        name = socket.gethostname().split(".")[0]
+        if sys.platform == "darwin":  # a Mac's network name can be its address; the name in System Settings is not
+            try:
+                asked = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True, timeout=5)
+                name = asked.stdout.strip() or name
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _named.append("This computer" if name.isdigit() or not name else name[:40])
+    return _named[0]
+
+
 def cut_text(text: str, most: int) -> tuple[str, bool]:
     return (text, False) if len(text) <= most else (text[:most].rstrip(), True)
 
@@ -384,7 +403,7 @@ def feed_answer(folder: Path, after: int = 0, limit: int = FEED_EVENTS, text_max
     chosen.reverse()
     return {
         "ok": True, "v": VERSION, "pc": int(time.time()), "mode": mode(folder), "listening": listening(folder),
-        "deviceName": (os.environ.get("VECTOR_RELAY_DEVICE_NAME") or socket.gethostname().split(".")[0])[:40],
+        "deviceName": device_name(),
         "chats": chat_list(folder), "waiting": waiting_ids(folder), "last": last, "events": chosen,
         "board": board_rows(folder),
     }
@@ -497,10 +516,10 @@ def read_note(path: Path) -> dict | None:
         if not found:
             continue
         moment = midnight + int(found[1]) * 3600 + int(found[2]) * 60
-        if moment < last:  # the log went on past midnight
+        if moment < last - 12 * 3600:  # the log went on past midnight; a small step back is a line out of order
             midnight += 86400
             moment += 86400
-        last = moment
+        last = max(last, moment)
         kind, words = found[3] or "", found[4].strip()
         marked = NOTE_PROGRESS.match(words)
         if marked:
@@ -510,7 +529,9 @@ def read_note(path: Path) -> dict | None:
         if kind not in ("", "note", "end"):
             words = f"{kind.capitalize()}: {words}"
         steps.append([moment, one_line(words, BOARD_STEP)])
-    updated = max(started, last, note_time(fields.get("turn_at", "")), note_time(fields.get("ended", "")))
+    updated = max(started, last, note_time(fields.get("turn_at", "")))
+    if state != "live" and note_time(fields.get("ended", "")) >= started:  # the note says itself when it ended
+        updated = note_time(fields["ended"])
     row = {
         "id": path.stem[:120], "src": "note", "title": one_line(fields.get("title") or goal or path.stem, BOARD_TITLE),
         "agent": one_line(fields.get("agent", ""), 20), "machine": one_line(fields.get("machine", ""), 40),
@@ -557,6 +578,12 @@ def board_rows(folder: Path, most: int = BOARD_ROWS, bytes_max: int = BOARD_BYTE
          "agent": row["agent"], "machine": "", "state": row["state"], "progress": row["progress"],
          "started": row["started"], "updated": row["updated"], "steps": row["steps"][-BOARD_STEPS:]}
         for chat, row in board_own(folder).items()
+    ]
+    listed = {row["id"] for row in rows}
+    rows += [  # in phone mode since before this PC had a board
+        {"id": chat, "chat": chat, "title": entry["label"] or f"Chat {chat}", "agent": "", "machine": "", "state": "live",
+         "progress": None, "started": entry["since"], "updated": entry["since"], "steps": []}
+        for chat, entry in phone.items() if entry["on"] and chat not in listed
     ]
     if found.get("notes"):
         rows += note_rows(Path(str(found["notes"])), str(found.get("notesMachine", "")), str(found.get("notesAgent", "")))

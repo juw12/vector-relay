@@ -67,6 +67,9 @@ class Case(unittest.TestCase):
     def setUp(self) -> None:
         SCRATCH.mkdir(exist_ok=True)
         self.folder = Path(tempfile.mkdtemp(prefix="home-", dir=SCRATCH))
+        while relay.helper_running(self.folder):  # 1 folder in 150 shares its guard port with a helper in real use on this computer
+            shutil.rmtree(self.folder, ignore_errors=True)
+            self.folder = Path(tempfile.mkdtemp(prefix="home-", dir=SCRATCH))
         self.key = os.urandom(32)
 
     def chat_on(self, chat: str = "abcd", label: str = "") -> str:
@@ -419,6 +422,42 @@ Titip 0.10.0
         (notes / "plain.md").write_text("# Not a session\n\n- 10:00 note: nothing\n", encoding="utf-8")
         self.assertIsNone(relay.read_note(notes / "plain.md"))
         self.assertIsNone(relay.read_note(notes / "missing.md"))
+
+    def test_a_log_line_out_of_order_is_not_a_day_later(self) -> None:
+        notes = self.folder / "notes"
+        notes.mkdir()
+        (notes / "2026-11-20-copy.md").write_text(
+            "---\ntitle: Copy\nstatus: shipped\nstarted: 2026-11-20T13:16\nended: 2026-11-20T16:09\n---\n## Log\n\n"
+            "- 13:16 start: Copy\n- 16:09 note: real run done\n- 16:14 note: one more thing\n- 16:09 end: partial: merged\n", encoding="utf-8")
+        row = relay.read_note(notes / "2026-11-20-copy.md")
+        day = int(time.mktime(time.strptime("2026-11-20 00:00", "%Y-%m-%d %H:%M")))
+        self.assertEqual([step[0] - day for step in row["steps"]], [16 * 3600 + 540, 16 * 3600 + 840, 16 * 3600 + 540])
+        self.assertEqual(row["updated"] - day, 16 * 3600 + 540)  # when the note says it ended
+        (notes / "2026-11-20-live.md").write_text(
+            "---\ntitle: Live\nstatus: live\nstarted: 2026-11-20T13:16\n---\n## Log\n\n- 13:20 note: a\n- 13:18 note: b\n", encoding="utf-8")
+        self.assertEqual(relay.read_note(notes / "2026-11-20-live.md")["updated"] - day, 13 * 3600 + 20 * 60)
+
+    def test_a_chat_in_phone_mode_since_before_the_board_is_on_it(self) -> None:
+        self.chat_on("oldy", "On since 1.2.2")
+        relay.board_step(self.folder, "newy", "a step", title="Has a row")
+        self.chat_on("newy", "Has a row")
+        rows = {row["id"]: row for row in relay.board_rows(self.folder)}
+        self.assertEqual((rows["oldy"]["title"], rows["oldy"]["chat"], rows["oldy"]["state"], rows["oldy"]["steps"]),
+                         ("On since 1.2.2", "oldy", "live", []))
+        self.assertEqual(len(rows), 2)
+
+    def test_this_computer_has_a_name_that_is_not_a_number(self) -> None:
+        relay._named.clear()
+        name = relay.device_name()
+        self.assertTrue(name and not name.isdigit() and len(name) <= 40, name)
+        self.assertEqual(relay.feed_answer(self.folder)["deviceName"], name)
+        relay._named[:] = ["192"]
+        os.environ["VECTOR_RELAY_DEVICE_NAME"] = "Bench PC"
+        try:
+            self.assertEqual(relay.device_name(), "Bench PC")
+        finally:
+            del os.environ["VECTOR_RELAY_DEVICE_NAME"]
+            relay._named.clear()
 
     def test_the_board_reads_a_folder_of_notes_and_can_take_one_computer_or_agent(self) -> None:
         notes = self.folder / "notes"
