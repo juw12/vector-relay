@@ -203,10 +203,9 @@ posted a step in the last 6 hours): then it costs the same 180 requests an hour 
 
 `scripts/e2e.py` needs `pip install playwright` and `playwright install webkit chromium`.
 
-Not yet checked: a real iPhone (WebKit is the closest stand-in), and All chats on the page as
-deployed: 1.3.0 was written on a Mac, and the page at vector-relay.pages.dev is deployed from
-another computer. Its 23 steps pass on the deployed relay with the page from this repo; the 88
-of `--live` are to be run after that deploy.
+Checked on the page as deployed: 1.3.2 went to vector-relay.pages.dev on 2026-11-21, and
+`python scripts/e2e.py --live` then passed 88 of 88 steps from a Windows computer, All chats
+included. Not yet checked: a real iPhone (WebKit is the closest stand-in).
 
 ## Versions
 
