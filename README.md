@@ -190,7 +190,7 @@ posted a step in the last 6 hours): then it costs the same 180 requests an hour 
 
 ## Tests
 
-    python -m unittest discover -s tests   78 tests: seal, feed, inbox, chats, pictures, the board, commands,
+    python -m unittest discover -s tests   81 tests: seal, feed, inbox, chats, pictures, the board, commands,
                                            whole trips, local mode, the 4-digit code, the list of versions
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
                                            (as a Pixel 7 and as a wide screen), relay rules in memory: 90 steps
@@ -214,6 +214,7 @@ the chat list); `CHANGELOG.md` and the lines below are made from it by
 `python scripts/make_changelog.py`.
 
 <!-- versions:start -->
+- **1.3.1** (2026-11-21) All chats on real notes: three fixes. A session note whose log has a line out of order no longer counts as ended tomorrow: it stood on top of Ended, marked "now". A chat that was already in phone mode when its computer moved to 1.3.0 is on All chats too. A Mac whose network name is its address shows under its computer name on the page, not as "192". The unit tests no longer fail now and then on a computer where Vector Relay is in use: a test folder that shares its guard port with the running helper is not used.
 - **1.3.0** (2026-11-21) All chats: what every chat on every computer is doing. All chats on the page: every chat of every computer it knows, the running ones first, each with its last step, how far it is and when. A row opens to its last steps, and one computer can be looked at alone. A chat says what it is doing without phone mode: `step --title "..." "..."` starts its row, `step --chat <id> "..."` adds a step, `--end shipped` ends it. A chat in phone mode is listed by itself, and what it says to the phone is its step. `board --notes <folder>` also lists the chats written down as session notes in that folder (the format Cairn writes), each under the computer its note names. `view` opens the page on the computer itself, already linked, on All chats. `board` prints the same list in the terminal. A computer that is asleep still shows what it last said. One with an older Vector Relay shows its chats in phone mode.
 - **1.2.2** (2026-11-20) Version history on the phone. The chat list on the phone has a Version history button: every version and what changed in it. One list of versions (docs/versions.json) now feeds the phone page, CHANGELOG.md and the README.
 - **1.2.1** (2026-11-20) The code alone, and the phone names the computer. `pair --code` prints the code alone, with no QR lines to read past. `pair --no-code` takes a code back. A second computer gets its code right after the first one was used (it was refused for 15 seconds before). Right after a computer is added, the phone names it and says the next step, where it showed an error until a chat was in phone mode. A computer whose chats all left phone mode shows the same calm line instead of "Your PC does not answer".

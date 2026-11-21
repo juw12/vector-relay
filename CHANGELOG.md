@@ -3,6 +3,13 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
+## 1.3.1 - 2026-11-21: All chats on real notes: three fixes ([#5](https://github.com/juw12/vector-relay/pull/5))
+
+- A session note whose log has a line out of order no longer counts as ended tomorrow: it stood on top of Ended, marked "now".
+- A chat that was already in phone mode when its computer moved to 1.3.0 is on All chats too.
+- A Mac whose network name is its address shows under its computer name on the page, not as "192".
+- The unit tests no longer fail now and then on a computer where Vector Relay is in use: a test folder that shares its guard port with the running helper is not used.
+
 ## 1.3.0 - 2026-11-21: All chats: what every chat on every computer is doing ([#4](https://github.com/juw12/vector-relay/pull/4))
 
 - All chats on the page: every chat of every computer it knows, the running ones first, each with its last step, how far it is and when. A row opens to its last steps, and one computer can be looked at alone.
