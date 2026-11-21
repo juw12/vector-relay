@@ -50,6 +50,9 @@ Source: [the drawing](https://example.com/drawing?a=1&b=2)
 <img src=x onerror="window.hacked=1">
 """
 
+# The pictures in shots/ are public: the computer in them has this name, not the real one of the PC that drew them.
+os.environ.setdefault("VECTOR_RELAY_DEVICE_NAME", "Work PC")
+
 steps: list[tuple[bool, str]] = []
 
 
@@ -218,6 +221,8 @@ def board_trip(playwright, expect, relay_address: str = "", page_address: str = 
             for name in ("mac", "asus", "old"):
                 host = root / name
                 host.mkdir()
+                while relay.helper_running(host):  # its guard port is held by a helper in real use on this computer
+                    host = Path(tempfile.mkdtemp(dir=root))
                 hosts.append(host)
                 assert run(host, "pair", "--relay", relay_address, "--page", base).returncode == 0
             mac, asus, old = hosts
@@ -228,8 +233,10 @@ def board_trip(playwright, expect, relay_address: str = "", page_address: str = 
                          ["start: Lab: automated runs", "note: [70%] 53 runs, 4 stopped with an error"])
             session_note(notes, f"{day}-digest.md", "Job digest: daily run", "shipped", "Office PC", "opencode",
                          ["start: Job digest: daily run", "end: shipped: 12 new jobs in the digest"])
-            for host in (mac, asus):  # both computers read the same folder: a note must still show once
-                relay.write_json(host / "settings.json", {**relay.settings(host), "notes": str(notes)})
+            session_note(notes, f"{day}-brain.md", "Public brain page: online", "shipped", "MacBook Pro 15,4", "vector",
+                         ["start: Public brain page: online", "end: shipped: 50 pages answer"])
+            for host, named in ((mac, "MacBook Pro 15,4"), (asus, "")):  # both read the same folder: a note must still show once
+                relay.write_json(host / "settings.json", {**relay.settings(host), "notes": str(notes), "notesThis": named})
             relay.board_step(mac, "tttt", "tests green", title="Titip 0.10.0: reminders and rules", agent="vector", progress=40)
             relay.board_step(mac, "wwww", "writing", title="Weekly report", agent="vector")
             relay.board_step(mac, "wwww", "sent to Juwen", end="shipped")
@@ -267,7 +274,7 @@ def board_trip(playwright, expect, relay_address: str = "", page_address: str = 
             page.locator("#deviceName").fill("MacBook")
             page.locator("#saveDevice").click()
             states = page.locator("#board .row").evaluate_all("rows => rows.map(row => row.classList.contains('live'))")
-            check(states == [True, True, True, False, False], "all chats: the running chats come first, then the ones that ended")
+            check(states == [True, True, True, False, False, False], "all chats: the running chats come first, then the ones that ended")
             atlas_row = page.locator("#board .row", has_text="Atlas FA")
             expect(atlas_row.locator(".state")).to_have_text("waiting for your prompt", timeout=slow)
             check(atlas_row.locator(".row-step").inner_text() == "reading the leak data",
@@ -282,6 +289,9 @@ def board_trip(playwright, expect, relay_address: str = "", page_address: str = 
             check(page.locator("#board .row", has_text="Weekly report").locator(".state").inner_text() == "shipped"
                   and page.locator("#board .row", has_text="Job digest").locator(".row-step").inner_text() == "shipped: 12 new jobs in the digest",
                   "all chats: a chat that ended stays, with how it ended")
+            expect(page.locator("#board .row", has_text="Public brain page").locator(".row-meta")).to_have_text("MacBook · vector · shipped")
+            check(page.locator("#board .only button").all_inner_texts() == ["All computers", "MacBook", "Office PC"],
+                  "all chats: a note that names this computer is listed under the name the computer has on the page, not as one more computer")
 
             # ---- a second computer, and one from before the board
             for name, address in (("ASUS laptop", links[1]), ("Old PC", links[2])):

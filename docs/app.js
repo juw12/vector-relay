@@ -15,7 +15,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.3.1";  // the newest entry in versions.json; a test keeps the two in step
+  var APP_VERSION = "1.3.2";  // the newest entry in versions.json; a test keeps the two in step
   var KEY = "vrelay.link", PENDING = "vrelay.pending", HINT = "vrelay.hint", CHAT = "vrelay.chat";
   var HANG_MS = 10000;          // a request with no reply for this long is dropped
   var ANSWER_HOLD_S = 8;        // the relay holds the request for the answer this long
@@ -611,6 +611,7 @@
     boards[id] = {
       rows: Array.isArray(answer.board) ? answer.board : null,   // null: that computer runs a Vector Relay from before the board
       chats: Array.isArray(answer.chats) ? answer.chats : [], pc: pc, why: "",
+      machine: typeof answer.machine === "string" ? answer.machine : "",   // the name session notes give that computer
     };
   }
 
@@ -698,7 +699,11 @@
 
   /* Every row of every board, once: a note two computers both read counts as one, the newer copy. */
   function boardItems() {
-    var found = {};
+    var found = {}, known = {};
+    devices.forEach(function (device) {   // a note that names a computer of this page is listed under the name it has here
+      var board = boards[idOf(device.link)];
+      if (board && board.machine) known[board.machine.toLowerCase()] = device.name;
+    });
     devices.forEach(function (device) {
       var id = idOf(device.link), board = boards[id];
       if (!board) return;
@@ -710,7 +715,8 @@
         var key = row.src === "note" ? "note|" + row.id : id + "|" + row.id;
         var phone = row.chat ? board.chats.filter(function (c) { return c.id === row.chat && c.on; })[0] : null;
         if (found[key] && found[key].row.updated >= row.updated) return;
-        found[key] = { key: key, row: row, device: device, where: String(row.machine || device.name), phone: phone || null };
+        var where = row.machine ? known[String(row.machine).toLowerCase()] || String(row.machine) : device.name;
+        found[key] = { key: key, row: row, device: device, where: where, phone: phone || null };
       });
     });
     return Object.keys(found).map(function (key) { return found[key]; }).sort(function (a, b) {
