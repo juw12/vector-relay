@@ -7,11 +7,15 @@
 
    The phone asks the PC a question (route "feed", "prompt", "event" or "image") by leaving it at
    the relay and waiting there for the answer. When the PC does not answer, the last sealed copy
-   the relay keeps is shown instead, with what stands in the way written in the bar. */
+   the relay keeps is shown instead, with what stands in the way written in the bar.
+
+   "All chats" is the board: every chat of every computer this page knows, the running ones first,
+   each with its last step. It is read from the sealed copies the relay keeps, one per computer,
+   each opened with that computer's own key, so it also shows a computer that is asleep. */
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.2.2";  // the newest entry in versions.json; a test keeps the two in step
+  var APP_VERSION = "1.3.0";  // the newest entry in versions.json; a test keeps the two in step
   var KEY = "vrelay.link", PENDING = "vrelay.pending", HINT = "vrelay.hint", CHAT = "vrelay.chat";
   var HANG_MS = 10000;          // a request with no reply for this long is dropped
   var ANSWER_HOLD_S = 8;        // the relay holds the request for the answer this long
@@ -25,6 +29,11 @@
   var BUSY_EVERY_MS = 2500, QUIET_EVERY_MS = 7000, BUSY_FOR_MS = 120000;
   var SILENT_S = 30 * 60;       // a chat that is on, not listening and silent this long has probably stopped
   var KEPT_EVENTS = 300;
+  var VIEW = "vrelay.view";     // "board" while All chats is what this page shows
+  var BOARD_EVERY_MS = 20000;   // how often the copies the relay keeps are read while All chats is open
+  var BOARD_ENDED = 12;         // ended chats shown before "Show older"
+  var BOARD_WAIT_MS = 6000;     // how long another computer gets to answer for its board
+  var BOARD_REST_MS = 120000;   // a computer that did not answer is asked again after this long
 
   var $ = function (id) { return document.getElementById(id); };
   var store = (function () {
@@ -111,11 +120,14 @@
   if (incoming && !(standalone && active && deviceById(idOf(incoming)))) active = remember(incoming);
   if (!active) active = devices[0] || null;
   var link = active ? active.link : null;
+  /* `view` on the PC opens this page with ?view=chats: taken once, then gone from the address. */
+  var search = location.search.replace(/([?&])view=chats(&|$)/, '$1').replace(/[?&]$/, '');
+  if (search !== location.search) store.setItem(VIEW, 'board');
   if (active) {
     store.setItem(ACTIVE, idOf(link));
     CHAT += ':' + idOf(link);
     PENDING += ':' + idOf(link);
-    history.replaceState(null, '', location.pathname + location.search + (ios ? ticketHash(link) : ''));
+    history.replaceState(null, '', location.pathname + search + (ios ? ticketHash(link) : ''));
   }
 
   // ------------------------------------------------------------ sealed questions and answers
@@ -210,6 +222,11 @@
   var loading = false;
   var busyUntil = 0, timer = 0, asking = false, shown = "";
   var clockOffset = 0;      // PC clock minus this phone's, in ms: questions are stamped in PC time
+  var view = store.getItem(VIEW) === "board" ? "board" : "chat";   // one chat and its prompt box, or All chats
+  var boards = {};          // computer -> {rows, chats, pc, why}: what it last said about its chats
+  var openRow = "";         // the row of the board that shows all its steps
+  var olderRows = false, onlyWhere = "", boardAsking = false, boardTimer = 0, boardShown = "";
+  var resting = {};         // computer -> when it may be asked live again
   try { pending = JSON.parse(store.getItem(PENDING) || "[]").filter(function (p) { return p && p.pid && p.text; }); } catch (error) { pending = []; }
   pending.forEach(function (p) {
     if (p.state === "sending") { p.state = "failed"; p.why = "Not sent."; }
@@ -255,6 +272,7 @@
         deviceLabels();
       }
     }
+    if (active) keepBoard(idOf(active.link), answer);
     if (live && answer.last < lastN) { events = []; lastN = 0; }   // the feed on the PC was cleared
     var before = events.length ? events[events.length - 1].n : 0;
     var byNumber = {};
@@ -477,15 +495,20 @@
     $("menuNew").hidden = !some;
     $("noChats").hidden = found.length > 0;
     $("noChats").textContent = rows.length ? "No chat with that name." : "No chat is in phone mode yet. On the PC, type /phone in a chat.";
-    var mark = JSON.stringify([selected, unread, found.map(function (row) { return [row.c.id, row.name, row.when, row.c.on, row.c.listening]; })]);
+    var running = boardItems().filter(function (item) { return item.row.state === "live"; }).length;
+    var mark = JSON.stringify([selected, view, running, unread, found.map(function (row) { return [row.c.id, row.name, row.when, row.c.on, row.c.listening]; })]);
     if (mark === listed) return;   // rows are not made again under a finger
     listed = mark;
+    $("showBoard").hidden = false;
+    $("showBoard").classList.toggle("chosen", view === "board");
+    $("showBoard").setAttribute("aria-pressed", view === "board" ? "true" : "false");
+    $("boardCount").textContent = running ? running + " running" : "";
     bar.textContent = "";
     found.forEach(function (row) {
-      var c = row.c;
-      var chip = element("button", "chip" + (c.id === selected ? " chosen" : "") + (c.on ? "" : " away"));
+      var c = row.c, chosen = c.id === selected && view !== "board";
+      var chip = element("button", "chip" + (chosen ? " chosen" : "") + (c.on ? "" : " away"));
       chip.type = "button";
-      chip.setAttribute("aria-pressed", c.id === selected ? "true" : "false");
+      chip.setAttribute("aria-pressed", chosen ? "true" : "false");
       chip.appendChild(element("span", "name", row.name));
       if (c.on && !c.listening) {
         var spin = element("span", "spin");
@@ -498,7 +521,7 @@
         chip.appendChild(fresh);
       }
       chip.appendChild(element("span", "when", row.when));
-      chip.onclick = function () { select(c.id); side(false); };
+      chip.onclick = function () { setView("chat"); select(c.id); side(false); };
       bar.appendChild(chip);
     });
   }
@@ -512,6 +535,7 @@
   }
 
   function render() {
+    if (view === "board") { chips(); renderBoard(); return; }
     var found = status(), own = chat(selected);
     var all = visible().concat(pending.filter(here).map(function (p) {
       return { kind: "prompt", from: "phone", text: p.text, t: p.t, state: p.state, why: p.why, pid: p.pid, id: p.pid, chat: p.chat, photo: p.photo, local: p.img ? p.url : "" };
@@ -576,6 +600,261 @@
     } catch (error) { /* said below */ }
     button.disabled = false;
     button.textContent = "Could not get it. Try again";
+  }
+
+  // ------------------------------------------------------------ All chats: the board of every computer
+  /* What one computer said about its chats. A live answer is newer than the copy the relay keeps. */
+  function keepBoard(id, answer) {
+    if (!answer || typeof answer !== "object") return;
+    var old = boards[id], pc = answer.pc || 0;
+    if (old && old.pc > pc) { old.why = ""; return; }
+    boards[id] = {
+      rows: Array.isArray(answer.board) ? answer.board : null,   // null: that computer runs a Vector Relay from before the board
+      chats: Array.isArray(answer.chats) ? answer.chats : [], pc: pc, why: "",
+    };
+  }
+
+  /* The sealed copy the relay keeps of one computer, opened with that computer's own key. */
+  async function openWith(ticket, text) {
+    var raw = fromBase64(text.trim()), key = fromBase64(ticket.k), plain;
+    if (subtle) {
+      var opener = await subtle.importKey("raw", key, "AES-GCM", false, ["decrypt"]);
+      plain = await subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, opener, raw.slice(12));
+    } else plain = window.softGcm(key).open(raw.subarray(0, 12), raw.subarray(12));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
+  async function sealWith(ticket, data) {
+    var iv = crypto.getRandomValues(new Uint8Array(12)), plain = new TextEncoder().encode(JSON.stringify(data));
+    var key = fromBase64(ticket.k), sealed;
+    if (subtle) {
+      var closer = await subtle.importKey("raw", key, "AES-GCM", false, ["encrypt"]);
+      sealed = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv: iv }, closer, plain));
+    } else sealed = window.softGcm(key).seal(iv, plain);
+    var all = new Uint8Array(12 + sealed.length);
+    all.set(iv, 0);
+    all.set(sealed, 12);
+    return toBase64(all);
+  }
+
+  /* The board of a computer whose feed this page does not show, asked from the computer itself.
+     null when it does not answer (asleep, or a Vector Relay from before the board). */
+  async function askBoard(device) {
+    var at = device.link.u + "/c/" + device.link.c, id = randomId();
+    try {
+      var body = await sealWith(device.link, { route: "board", t: Date.now() });
+      var reply = await reach(at + "/ask/" + id, { method: "POST", headers: { "Content-Type": "text/plain" }, body: body }, HANG_MS);
+      var started = Date.now();
+      while (reply.ok && Date.now() - started < BOARD_WAIT_MS) {
+        var asked = Date.now();
+        reply = await reach(at + "/answer/" + id + "?wait=" + Math.ceil(BOARD_WAIT_MS / 1000), { cache: "no-store" }, ANSWER_HANG_MS);
+        if (reply.status === 200) {
+          var answer = await openWith(device.link, await reply.text());
+          return answer && answer.ok ? answer : null;
+        }
+        if (reply.status !== 204) return null;
+        if (Date.now() - asked < 1000) await pause(400);   // this relay did not hold the request
+      }
+    } catch (error) { /* said by the copy the relay keeps */ }
+    return null;
+  }
+
+  async function lookBoards() {
+    clearTimeout(boardTimer);
+    if (boardAsking || !devices.length) return;
+    boardAsking = true;
+    await Promise.all(devices.map(async function (device) {
+      var id = idOf(device.link), why = "";
+      try {
+        var reply = await reach(device.link.u + "/c/" + device.link.c + "/state", { cache: "no-store" }, HANG_MS);
+        if (reply.status === 404) why = "the relay has nothing from it yet";
+        else if (!reply.ok) why = "the relay answered with an error (" + reply.status + ")";
+        else {
+          var text = await reply.text(), state = null;
+          try { state = await openWith(device.link, text); } catch (error) { why = "the key kept here does not open it: add it again"; }
+          if (state) keepBoard(id, state);
+        }
+      } catch (error) {
+        why = navigator.onLine === false ? "this device is offline" : "the relay was not reached";
+      }
+      if (why) boards[id] = Object.assign(boards[id] || { rows: [], chats: [], pc: 0 }, { why: why });
+    }));
+    if (view === "board") {
+      render();   // what the relay keeps shows at once; what the computers themselves say follows
+      await Promise.all(devices.map(async function (device) {
+        var id = idOf(device.link), board = boards[id];
+        if ((active && id === idOf(active.link)) || !board || board.why || board.rows === null || Date.now() < (resting[id] || 0)) return;
+        var answer = await askBoard(device);
+        if (answer) keepBoard(id, answer);
+        else resting[id] = Date.now() + BOARD_REST_MS;
+      }));
+    }
+    boardAsking = false;
+    if (view === "board") {
+      render();
+      if (!document.hidden) boardTimer = setTimeout(lookBoards, BOARD_EVERY_MS);
+    } else chips();
+  }
+
+  /* Every row of every board, once: a note two computers both read counts as one, the newer copy. */
+  function boardItems() {
+    var found = {};
+    devices.forEach(function (device) {
+      var id = idOf(device.link), board = boards[id];
+      if (!board) return;
+      var rows = board.rows || board.chats.map(function (c) {   // an older Vector Relay: its chats in phone mode at least
+        return { id: c.id, chat: c.id, title: chatName(c), state: c.on ? "live" : "done", started: c.since, updated: c.since, steps: [] };
+      });
+      rows.forEach(function (row) {
+        if (!row || typeof row.id !== "string") return;
+        var key = row.src === "note" ? "note|" + row.id : id + "|" + row.id;
+        var phone = row.chat ? board.chats.filter(function (c) { return c.id === row.chat && c.on; })[0] : null;
+        if (found[key] && found[key].row.updated >= row.updated) return;
+        found[key] = { key: key, row: row, device: device, where: String(row.machine || device.name), phone: phone || null };
+      });
+    });
+    return Object.keys(found).map(function (key) { return found[key]; }).sort(function (a, b) {
+      return (b.row.state === "live") - (a.row.state === "live") || b.row.updated - a.row.updated;
+    });
+  }
+
+  function moment(seconds) { return (day(seconds) === "Today" ? "" : day(seconds) + " ") + clock(seconds); }
+
+  function stateWords(item) {
+    var row = item.row, far = typeof row.progress === "number" ? " · " + row.progress + "%" : "";
+    if (row.state === "live") {
+      if (item.phone) return (item.phone.listening ? "waiting for your prompt" : "working") + far;
+      return (row.turn === "waiting" ? "waiting" : "running") + far;
+    }
+    if (row.state === "silent") return "no word since " + moment(row.updated);
+    return String(row.state || "done");
+  }
+
+  function openChat(item) {
+    var id = idOf(item.device.link);
+    store.setItem("vrelay.chat:" + id, item.row.chat);
+    if (active && idOf(active.link) === id) { setView("chat"); select(item.row.chat); return; }
+    store.setItem(VIEW, "chat");   // the page starts again on that computer, with this chat open
+    if (!switchDevice(item.device)) store.setItem(VIEW, "board");   // a prompt is still on its way: stay here
+  }
+
+  function boardRow(item) {
+    var row = item.row, steps = Array.isArray(row.steps) ? row.steps : [], open = openRow === item.key;
+    var waits = row.state === "live" && (item.phone ? item.phone.listening : row.turn === "waiting");
+    var made = element("article", "row " + (/^[a-z]+$/.test(row.state || "") ? row.state : "done") + (waits ? " waits" : "") + (open ? " open" : ""));
+    var head = element("button", "row-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", open ? "true" : "false");
+    head.appendChild(element("span", "mark"));
+    head.appendChild(element("span", "row-title", String(row.title || "Chat " + row.id)));
+    head.appendChild(element("span", "when", since(row.updated)));
+    head.onclick = function () { openRow = open ? "" : item.key; boardShown = ""; renderBoard(); };
+    made.appendChild(head);
+    var meta = element("p", "row-meta");
+    [item.where, row.agent].forEach(function (part) { if (part) meta.appendChild(document.createTextNode(String(part) + " · ")); });
+    meta.appendChild(element("span", "state", stateWords(item)));
+    made.appendChild(meta);
+    var last = steps.length ? steps[steps.length - 1] : null;
+    if (!open) {
+      if (last) made.appendChild(element("p", "row-step", String(last[1])));
+      return made;
+    }
+    var more = element("div", "row-more"), list = element("ol");
+    steps.forEach(function (step) {
+      var line = element("li");
+      line.appendChild(element("time", "", moment(step[0])));
+      line.appendChild(element("span", "", String(step[1])));
+      list.appendChild(line);
+    });
+    if (steps.length) more.appendChild(list);
+    more.appendChild(element("p", "times", "Started " + moment(row.started) + (steps.length ? "" : ". It has posted no step yet.")));
+    if (item.phone) {
+      var go = element("button", "open-chat", "Open this chat");
+      go.type = "button";
+      go.onclick = function () { openChat(item); };
+      more.appendChild(go);
+    }
+    made.appendChild(more);
+    return made;
+  }
+
+  function renderBoard() {
+    var every = boardItems(), names = [];
+    every.forEach(function (item) { if (names.indexOf(item.where) < 0) names.push(item.where); });
+    if (names.indexOf(onlyWhere) < 0) onlyWhere = "";
+    var items = every.filter(function (item) { return !onlyWhere || item.where === onlyWhere; });
+    var running = items.filter(function (item) { return item.row.state === "live"; });
+    var ended = items.filter(function (item) { return item.row.state !== "live"; });
+    var heard = devices.filter(function (device) { return boards[idOf(device.link)]; });
+    var silent = heard.filter(function (device) { return boards[idOf(device.link)].why; });
+    var words = !heard.length ? "Asking the relay" :
+      running.length + " running" + (names.length > 1 && !onlyWhere ? " on " + names.length + " computers" : onlyWhere ? " on " + onlyWhere : "") +
+      (silent.length ? " · " + silent.length + " not reached" : "");
+    $("dot").className = "dot " + (!heard.length ? "" : silent.length ? "bad" : "ok");
+    $("status").textContent = words;
+    $("title").textContent = "All chats";
+    document.title = "All chats";
+    var mark = JSON.stringify([openRow, olderRows, onlyWhere, devices.map(function (device) {
+      var board = boards[idOf(device.link)];
+      return [device.name, board ? [board.why, board.pc ? since(board.pc) : "", board.rows === null] : null];
+    }), items.map(function (item) { return [item.key, item.where, item.row.updated, item.row.state, item.row.progress, since(item.row.updated), stateWords(item), (item.row.steps || []).length]; })]);
+    if (mark === boardShown) return;   // rows are not made again under a finger
+    boardShown = mark;
+    var place = element("div", "board-in");
+    if (names.length > 1) {
+      var only = element("div", "only");
+      [""].concat(names).forEach(function (name) {
+        var pick = element("button", "", name || "All computers");
+        pick.type = "button";
+        pick.setAttribute("aria-pressed", name === onlyWhere ? "true" : "false");
+        pick.onclick = function () { onlyWhere = name; olderRows = false; renderBoard(); };
+        only.appendChild(pick);
+      });
+      place.appendChild(only);
+    }
+    var title = element("h2", "group", "Running now ");
+    title.appendChild(element("span", "", String(running.length)));
+    place.appendChild(title);
+    if (!running.length) place.appendChild(element("p", "empty", heard.length ? "No chat is running." : ""));
+    running.forEach(function (item) { place.appendChild(boardRow(item)); });
+    if (ended.length) {
+      title = element("h2", "group", "Ended ");
+      title.appendChild(element("span", "", String(ended.length)));
+      place.appendChild(title);
+      ended.slice(0, olderRows ? ended.length : BOARD_ENDED).forEach(function (item) { place.appendChild(boardRow(item)); });
+      if (!olderRows && ended.length > BOARD_ENDED) {
+        var older = element("button", "older", "Show " + (ended.length - BOARD_ENDED) + " older");
+        older.type = "button";
+        older.onclick = function () { olderRows = true; renderBoard(); };
+        place.appendChild(older);
+      }
+    }
+    place.appendChild(element("h2", "group", "Computers"));
+    devices.forEach(function (device) {
+      var board = boards[idOf(device.link)], line = element("p", "computer" + (board && (board.why || board.rows === null) ? " bad" : ""));
+      line.appendChild(element("strong", "", device.name));
+      var said = !board ? " · asking" : board.why ? " · " + board.why + (board.pc ? " (last heard " + since(board.pc) + " ago)" : "") :
+        board.rows === null ? " · runs a Vector Relay from before All chats: only its chats in phone mode show. Update it there." :
+        " · heard " + (since(board.pc) === "now" ? "just now" : since(board.pc) + " ago");
+      line.appendChild(element("span", "", said));
+      place.appendChild(line);
+    });
+    place.appendChild(element("p", "how", "A chat is listed when it is in phone mode, when it posts its steps (step), or when its computer reads a folder of session notes (board --notes)."));
+    var board = $("board"), top = board.scrollTop;
+    board.replaceChildren(place);
+    board.scrollTop = top;
+  }
+
+  function setView(next) {
+    if (view === next) return;
+    view = next;
+    store.setItem(VIEW, next);
+    document.body.classList.toggle("on-board", next === "board");
+    shown = boardShown = listed = "";
+    if (next === "board") lookBoards();
+    else clearTimeout(boardTimer);
+    render();
+    if (next === "chat") $("feed").scrollTop = $("feed").scrollHeight;
   }
 
   // ------------------------------------------------------------ talking to the PC
@@ -831,6 +1110,7 @@
     $('deviceControls').hidden = false;
     $('sendTarget').textContent = 'To: ' + active.name;
     $('send').setAttribute('aria-label', 'Send to ' + active.name);
+    if (view === 'board') renderBoard();   // a new name shows on its rows at once
   }
   function switchDevice(next) {
     if (!next) return;
@@ -849,6 +1129,7 @@
     history.replaceState(null, '', location.pathname + location.search + ticketHash(next.link));
     // Reset the entire feed, timers, listeners, image caches and composer together.
     location.reload();
+    return true;
   }
   var renaming = false;
   var byCode = canCode;   // which of the two ways the dialog shows
@@ -976,6 +1257,9 @@
     return;
   }
   $("composer").hidden = false;
+  document.body.classList.toggle("on-board", view === "board");
+  $("showBoard").hidden = false;
+  $("showBoard").addEventListener("click", function () { setView("board"); side(false); });
   $("menu").addEventListener("click", function () { side(!document.body.classList.contains("side-open")); });
   $("shade").addEventListener("click", function () { side(false); });
   $("find").addEventListener("input", chips);
@@ -1022,8 +1306,13 @@
     $("hint").hidden = false;
     $("hintClose").onclick = function () { store.setItem(HINT, "1"); $("hint").hidden = true; };
   }
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) look(); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) return;
+    look();
+    if (view === "board") lookBoards();
+  });
   window.addEventListener("online", look);
   render();
   look();
+  lookBoards();   // once for the count beside All chats, then every BOARD_EVERY_MS while it is open
 }());

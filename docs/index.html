@@ -18,7 +18,7 @@
 <meta name="apple-mobile-web-app-title" content="Vector Relay">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=1.3.3">
+<link rel="stylesheet" href="styles.css?v=1.4.0">
 </head>
 <body>
 <aside id="side" class="side" aria-label="Chats">
@@ -30,6 +30,10 @@
       <button type="button" id="renameDevice">Rename</button>
     </div>
   </div>
+  <button type="button" id="showBoard" class="board-link" aria-pressed="false" hidden>
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4.5 6.5h15M4.5 12h15M4.5 17.5h15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <span class="name">All chats</span><span id="boardCount" class="when"></span>
+  </button>
   <label class="search">
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     <span class="hidden">Search chats</span>
@@ -82,6 +86,7 @@
   </header>
 
   <main id="feed" class="feed" aria-live="polite" aria-label="What the chat on your PC said"></main>
+  <section id="board" class="board" aria-label="Every chat on your computers and its last step"></section>
 
   <section id="none" class="sheet" hidden>
     <h2>This phone is not linked yet</h2>
@@ -125,6 +130,6 @@
 
 <noscript><p class="sheet">This page needs JavaScript: it opens the sealed text from your PC on this phone.</p></noscript>
 <script src="softcrypto.js?v=1.1.0"></script>
-<script src="app.js?v=1.3.3"></script>
+<script src="app.js?v=1.4.0"></script>
 </body>
 </html>

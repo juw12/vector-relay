@@ -297,6 +297,260 @@ class ChatTests(Case):
         self.assertEqual(list((self.folder / "files").glob("*")), [])
 
 
+class BoardTests(Case):
+    """The board: one row per chat, with its last steps."""
+
+    NOTE = """---
+title: "Titip 0.10.0: the rest of \\"Outlook\\""
+type: session
+status: {status}
+started: {day}T23:50
+machine: MacBook Pro 15,4
+agent: vector
+{more}---
+## Goal
+
+Titip 0.10.0
+
+## Log
+
+- 23:50 start: Titip 0.10.0
+- 23:55 prompt: also the reminders
+- 00:10 note: [40%] tests green
+- 00:20 commit: pull request 21 merged
+{last}"""
+
+    def note(self, folder: Path, name: str, status: str = "live", day: str = "", more: str = "", last: str = "") -> Path:
+        day = day or time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+        path = folder / name
+        path.write_text(self.NOTE.format(status=status, day=day, more=more, last=last), encoding="utf-8")
+        return path
+
+    def test_a_chat_posts_its_steps_without_a_phone(self) -> None:
+        first = run(self.folder, "step", "--title", "Atlas FA leak study", "--agent", "vector", "reading the leak data")
+        self.assertEqual(first.returncode, 0, first.stdout)
+        chat = first.stdout.split("chat=")[1][:4]
+        self.assertRegex(chat, relay.CHAT_ID)
+        self.assertIn("ok chat=" + chat, run(self.folder, "step", "--chat", chat, "--progress", "40", "tests  green\nall of them").stdout)
+        row = relay.board_rows(self.folder)[0]
+        self.assertEqual((row["id"], row["chat"], row["title"], row["agent"], row["state"], row["progress"]),
+                         (chat, chat, "Atlas FA leak study", "vector", "live", 40))
+        self.assertEqual([step[1] for step in row["steps"]], ["reading the leak data", "tests green all of them"])
+        listed = run(self.folder, "board").stdout
+        self.assertIn("1 running", listed)
+        self.assertIn("Atlas FA leak study", listed)
+        self.assertIn("tests green all of them", listed)
+
+    def test_a_step_needs_a_chat_and_something_to_say(self) -> None:
+        self.assertEqual(run(self.folder, "step", "nothing knows me").returncode, 2)
+        self.assertEqual(run(self.folder, "step", "--chat", "zzzz", "who").returncode, 2)
+        chat = run(self.folder, "step", "--title", "One").stdout.split("chat=")[1][:4]
+        self.assertEqual(run(self.folder, "step", "--chat", chat).returncode, 2)
+        self.assertEqual(relay.board_rows(self.folder)[0]["steps"], [])
+
+    def test_a_chat_that_ended_stays_and_runs_again_when_it_speaks(self) -> None:
+        chat = run(self.folder, "step", "--title", "Report", "writing").stdout.split("chat=")[1][:4]
+        run(self.folder, "step", "--chat", chat, "--end", "shipped", "sent to Juwen")
+        row = relay.board_rows(self.folder)[0]
+        self.assertEqual((row["state"], row["steps"][-1][1]), ("shipped", "sent to Juwen"))
+        run(self.folder, "step", "--chat", chat, "he asked for one more table")
+        self.assertEqual(relay.board_rows(self.folder)[0]["state"], "live")
+
+    def test_only_the_last_steps_travel_and_a_long_one_is_cut(self) -> None:
+        for number in range(relay.BOARD_STEPS_KEPT + 5):
+            relay.board_step(self.folder, "abcd", f"step {number} " + "測" * 400, title="Long")
+        self.assertEqual(len(relay.board_own(self.folder)["abcd"]["steps"]), relay.BOARD_STEPS_KEPT)
+        steps = relay.board_rows(self.folder)[0]["steps"]
+        self.assertEqual(len(steps), relay.BOARD_STEPS)
+        self.assertTrue(steps[-1][1].startswith(f"step {relay.BOARD_STEPS_KEPT + 4} "))
+        self.assertEqual(len(steps[-1][1]), relay.BOARD_STEP)
+        self.assertTrue(steps[-1][1].endswith("…"))
+
+    def test_running_chats_come_first_and_the_board_stays_small(self) -> None:
+        now = int(time.time())
+        rows = {}
+        for number in range(70):
+            chat = "".join("abcdefghjk"[int(digit)] for digit in f"{number:04d}")
+            rows[chat] = {"title": "T" * 200, "agent": "vector", "state": "live" if number % 7 == 0 else "shipped", "progress": 50,
+                          "started": now - 5000, "updated": now - number * 60, "own": True,
+                          "steps": [[now - number * 60, "測" * relay.BOARD_STEP]] * relay.BOARD_STEPS_KEPT}
+        relay.write_json(self.folder / "board.json", rows)
+        shown = relay.board_rows(self.folder)
+        self.assertLessEqual(len(shown), relay.BOARD_ROWS)
+        self.assertLessEqual(len(json.dumps(shown, ensure_ascii=False).encode("utf-8")), relay.BOARD_BYTES)
+        states = [row["state"] for row in shown]
+        self.assertEqual(states.count("live"), 10)
+        self.assertEqual(states[:10], ["live"] * 10)
+        self.assertEqual([row["updated"] for row in shown[10:]], sorted((row["updated"] for row in shown[10:]), reverse=True))
+        for number in range(relay.STATE_EVENTS):
+            relay.add_event(self.folder, "result", "測" * relay.STATE_TEXT)
+        state, sealed = relay.fit_copy(self.folder, self.key)
+        self.assertLess(len(sealed), 300_000)
+        self.assertEqual(relay.unseal(self.key, sealed)["board"], state["board"])
+
+    def test_a_running_chat_that_went_quiet_is_shown_as_silent_and_an_old_one_goes(self) -> None:
+        now = int(time.time())
+        row = {"title": "Quiet", "agent": "", "progress": None, "own": True, "steps": []}
+        relay.write_json(self.folder / "board.json", {
+            "quie": {**row, "state": "live", "started": now - 30_000, "updated": now - relay.BOARD_QUIET_S - 60},
+            "wait": {**row, "state": "live", "started": now - 30_000, "updated": now - relay.BOARD_QUIET_S - 60},
+            "gone": {**row, "state": "shipped", "started": now - 900_000, "updated": now - relay.BOARD_KEPT_S - 60},
+        })
+        self.chat_on("wait", "Waits all day")
+        states = {row["id"]: row["state"] for row in relay.board_rows(self.folder)}
+        self.assertEqual(states, {"wait": "live", "quie": "silent"})
+
+    def test_a_session_note_is_a_row(self) -> None:
+        notes = self.folder / "notes"
+        notes.mkdir()
+        day = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+        row = relay.read_note(self.note(notes, f"{day}-titip.md", day=day))
+        start = int(time.mktime(time.strptime(day + " 23:50", "%Y-%m-%d %H:%M")))
+        self.assertEqual((row["id"], row["src"], row["title"], row["machine"], row["agent"], row["state"], row["progress"], row["started"]),
+                         (f"{day}-titip", "note", 'Titip 0.10.0: the rest of "Outlook"', "MacBook Pro 15,4", "vector", "live", 40, start))
+        self.assertEqual(row["steps"], [[start + 300, "Prompt: also the reminders"], [start + 1200, "tests green"],
+                                        [start + 1800, "Commit: pull request 21 merged"]])  # past midnight, and "start" says only the title
+        self.assertEqual(row["updated"], start + 1800)
+        ended = relay.read_note(self.note(notes, f"{day}-ended.md", status="shipped", day=day, more=f"ended: {day}T23:59\n",
+                                          last="- 00:25 end: shipped: Titip 0.10.0 merged\n"))
+        self.assertEqual((ended["state"], ended["steps"][-1][1]), ("shipped", "shipped: Titip 0.10.0 merged"))
+        odd = relay.read_note(self.note(notes, "odd.md", status="reviewing", day=day, more="turn: working\n"))
+        self.assertEqual((odd["state"], "turn" in odd), ("done", False))
+        (notes / "plain.md").write_text("# Not a session\n\n- 10:00 note: nothing\n", encoding="utf-8")
+        self.assertIsNone(relay.read_note(notes / "plain.md"))
+        self.assertIsNone(relay.read_note(notes / "missing.md"))
+
+    def test_the_board_reads_a_folder_of_notes_and_can_take_one_computer_or_agent(self) -> None:
+        notes = self.folder / "notes"
+        notes.mkdir()
+        day = time.strftime("%Y-%m-%d", time.localtime(time.time() - 3600))
+        self.note(notes, f"{day}-mac.md", day=day)
+        other = self.note(notes, f"{day}-asus.md", day=day)
+        other.write_text(other.read_text(encoding="utf-8").replace("MacBook Pro 15,4", "ASUS").replace("agent: vector", "agent: opencode"), encoding="utf-8")
+        self.note(notes, "2020-01-01-old.md", status="shipped", day="2020-01-01")
+        (notes / "readme.txt").write_text("not a note", encoding="utf-8")
+        said = run(self.folder, "board", "--notes", str(notes))
+        self.assertEqual(said.returncode, 0, said.stdout)
+        self.assertIn("2 running", said.stdout)
+        self.assertIn("MacBook Pro 15,4 · vector", said.stdout)
+        relay._notes["at"] = 0
+        self.assertEqual(sorted(row["machine"] for row in relay.board_rows(self.folder)), ["ASUS", "MacBook Pro 15,4"])
+        self.assertTrue(relay.board_wanted(self.folder))
+        run(self.folder, "board", "--notes", str(notes), "--machine", "asus")
+        self.assertEqual([row["agent"] for row in relay.board_rows(self.folder)], ["opencode"])
+        run(self.folder, "board", "--notes", str(notes), "--agent", "Vector")
+        self.assertEqual([row["machine"] for row in relay.board_rows(self.folder)], ["MacBook Pro 15,4"])
+        self.assertEqual(run(self.folder, "board", "--notes", str(notes / "nowhere")).returncode, 2)
+        self.assertIn("no longer", run(self.folder, "board", "--no-notes").stdout)
+        self.assertEqual(relay.board_rows(self.folder), [])
+        self.assertFalse(relay.board_wanted(self.folder))
+
+    def test_a_note_is_read_again_only_when_it_changed(self) -> None:
+        notes = self.folder / "notes"
+        notes.mkdir()
+        day = time.strftime("%Y-%m-%d")
+        path = self.note(notes, f"{day}-one.md", day=day)
+        relay._notes["at"] = 0
+        first = relay.note_rows(notes)[0]
+        relay._notes["at"] = 0
+        self.assertIs(relay.note_rows(notes)[0], first)
+        path.write_text(path.read_text(encoding="utf-8") + "- 00:30 note: [90%] one more thing\n", encoding="utf-8")
+        self.assertIs(relay.note_rows(notes)[0], first)  # looked at only every NOTES_EVERY_S
+        relay._notes["at"] = 0
+        self.assertEqual(relay.note_rows(notes)[0]["progress"], 90)
+
+
+class BoardTripTests(Case):
+    """The board on its way to the page, and what phone mode writes on it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fake = FakeRelay()
+        self.assertEqual(run(self.folder, "pair", "--relay", self.fake.address).returncode, 0)
+        self.phone = Phone(relay.settings(self.folder))
+
+    def tearDown(self) -> None:
+        super().tearDown()
+        self.fake.close()
+
+    def kept(self) -> dict:
+        """The sealed copy the relay keeps, opened."""
+        status, body, deadline = 0, "", time.time() + 20
+        while time.time() < deadline and status != 200:
+            status, body = self.phone.http("GET", "/state")
+            time.sleep(0.2)
+        self.assertEqual(status, 200)
+        return relay.unseal(self.phone.key, body)
+
+    def test_a_chat_in_phone_mode_is_on_the_board_and_what_it_says_is_its_step(self) -> None:
+        chat = run(self.folder, "on", "--label", "Atlas FA").stdout.split("chat=")[1][:4]
+        row = relay.board_rows(self.folder)[0]
+        self.assertEqual((row["chat"], row["title"], row["state"], row["steps"]), (chat, "Atlas FA", "live", []))
+        run(self.folder, "say", "--chat", chat, "reading the 3 mail threads")
+        result = self.folder / "result.md"
+        result.write_text("\n## Margin is **0.04 mm**\n\nsee the table\n", encoding="utf-8")
+        run(self.folder, "say", "--chat", chat, "--kind", "result", "--file", str(result))
+        run(self.folder, "say", "--chat", chat, "--kind", "note", "not a step")
+        self.assertEqual([step[1] for step in relay.board_rows(self.folder)[0]["steps"]],
+                         ["reading the 3 mail threads", "Result: Margin is **0.04 mm"])
+        run(self.folder, "off", "--chat", chat)
+        row = relay.board_rows(self.folder)[0]
+        self.assertEqual((row["state"], row["steps"][-1][1]), ("done", "Left phone mode"))
+        run(self.folder, "on", "--chat", chat)
+        self.assertEqual(relay.board_rows(self.folder)[0]["state"], "live")
+
+    def test_a_chat_that_posts_its_own_steps_does_not_end_when_phone_mode_goes_off(self) -> None:
+        chat = run(self.folder, "on", "--label", "Atlas FA").stdout.split("chat=")[1][:4]
+        self.assertIn("ok chat=" + chat, run(self.folder, "step", "--progress", "10", "the only chat in phone mode needs no id").stdout)
+        run(self.folder, "off", "--chat", chat)
+        row = relay.board_rows(self.folder)[0]
+        self.assertEqual((row["state"], row["progress"]), ("live", 10))
+
+    def test_the_board_travels_sealed_in_the_answer_and_in_the_copy_the_relay_keeps(self) -> None:
+        chat = run(self.folder, "step", "--title", "Not in phone mode", "step one").stdout.split("chat=")[1][:4]
+        self.assertTrue(relay.helper_running(self.folder))  # a step starts the helper, as phone mode does
+        kept = self.kept()
+        self.assertEqual([(row["id"], row["title"], row["steps"][-1][1]) for row in kept["board"]], [(chat, "Not in phone mode", "step one")])
+        self.assertEqual(kept["chats"], [])  # on the board, and still not a chat the phone can prompt
+        self.assertNotIn("Not in phone mode", self.phone.http("GET", "/state")[1])
+        run(self.folder, "step", "--chat", chat, "step two")
+        self.assertEqual(self.phone.ask("feed", after=0)["board"][0]["steps"][-1][1], "step two")
+        alone = self.phone.ask("board")  # what All chats asks a computer whose feed it does not show
+        self.assertEqual((alone["ok"], alone["board"][0]["steps"][-1][1], "events" in alone), (True, "step two", False))
+        self.assertTrue(relay.board_wanted(self.folder))
+        run(self.folder, "step", "--chat", chat, "--end", "dropped")
+        self.assertFalse(relay.board_wanted(self.folder))
+
+    def test_the_helper_hands_the_page_to_this_pc_and_nothing_else(self) -> None:
+        run(self.folder, "on")
+        base = f"http://127.0.0.1:{relay.view_port(self.folder)}"
+        with DIRECT.open(base + "/", timeout=10) as reply:
+            self.assertIn("Vector Relay", reply.read().decode("utf-8"))
+            self.assertEqual(reply.headers["Cache-Control"], "no-cache")
+        with DIRECT.open(base + "/app.js?v=1", timeout=10) as reply:
+            self.assertIn("All chats", reply.read().decode("utf-8"))
+        for path in ("/settings.json", "/../settings.json", "/c/" + relay.settings(self.folder)["channel"] + "/state", "/vector_relay.py"):
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                DIRECT.open(base + path, timeout=10)
+            self.assertEqual(refused.exception.code, 404)
+            refused.exception.close()
+
+    @unittest.skipIf(os.name == "nt", "the stand-in browser is a shell command")
+    def test_view_opens_all_chats_from_this_pc_and_prints_no_key(self) -> None:
+        opened = self.folder / "opened.txt"
+        browser = self.folder / "browser.sh"
+        browser.write_text(f'#!/bin/sh\nprintf "%s" "$1" > "{opened}"\n', encoding="utf-8")
+        browser.chmod(0o755)
+        said = subprocess.run([sys.executable, str(REPO / "vector_relay.py"), "view"], capture_output=True, timeout=60, encoding="utf-8",
+                              env={**os.environ, "VECTOR_RELAY_HOME": str(self.folder), "BROWSER": f"{browser} %s"})
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+        found = relay.settings(self.folder)
+        address = opened.read_text(encoding="utf-8")
+        self.assertEqual(address, f"http://127.0.0.1:{relay.view_port(self.folder)}/?view=chats#r={relay.ticket(found)}")
+        self.assertNotIn(found["key"], said.stdout)
+        self.assertNotIn(relay.ticket(found), said.stdout)
+
+
 class CommandTests(Case):
     def test_before_a_phone_is_linked_the_commands_say_what_to_do(self) -> None:
         on = run(self.folder, "on")

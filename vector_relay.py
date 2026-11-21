@@ -13,6 +13,15 @@ tools it already has:
 Several chats can be in phone mode at once: each has its own id, and the phone picks which one
 a prompt goes to.
 
+A chat that is not in phone mode can still say what it is doing:
+
+    vector_relay.py step --title "Atlas FA" "reading the leak data"   a row on the board; prints its chat id
+    vector_relay.py step --chat <id> --end shipped "report sent"      the chat is over
+    vector_relay.py board                                             every chat on this PC and its last step
+    vector_relay.py view                                              the page, on this PC's own browser
+
+The page shows the board of every computer it knows, running chats first: "All chats".
+
 Everything that leaves this PC is sealed with AES-256-GCM. The key is made here and reaches the
 phone only inside the QR code, after the "#" of the address, which a browser sends to no server.
 The relay (functions/ in this repo, on Cloudflare Pages with a D1 database) holds ciphertext it
@@ -55,7 +64,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.2.2"
+VERSION = "1.3.0"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -89,6 +98,16 @@ PICTURE_SIDE, PICTURE_BYTES = 1600, 600_000  # a picture for the phone: longest 
 PHOTO_CHARS = 1_000_000  # a photo from the phone, as base64
 FILES_KEPT_S = 14 * 24 * 3600
 CHAT_KEPT_S = 24 * 3600  # a chat that went off stays on the phone this long
+
+ENDINGS = ("shipped", "partial", "dropped", "done")  # how a chat on the board can end
+BOARD_ROWS = 40  # chats on the board: the running ones first, then the ones that ended last
+BOARD_STEPS, BOARD_STEPS_KEPT = 5, 20  # the last steps of a chat that travel, and that this PC keeps
+BOARD_TITLE, BOARD_STEP = 140, 240  # characters
+BOARD_BYTES = 40_000  # the whole board, inside the copy the relay keeps
+BOARD_KEPT_S = 7 * 24 * 3600  # a chat that ended stays on the board this long
+BOARD_QUIET_S = 6 * 3600  # a running chat with no step for this long has probably stopped
+NOTES_EVERY_S = 15  # how often the folder of session notes is looked at
+RELAY_STATE_CHARS = 290_000  # the relay takes a sealed copy of 300,000 characters
 
 PUBLISH_GAP_S = 120  # the relay's free plan allows 1,000 stored writes a day
 HEARTBEAT_S = 30 * 60
@@ -367,7 +386,215 @@ def feed_answer(folder: Path, after: int = 0, limit: int = FEED_EVENTS, text_max
         "ok": True, "v": VERSION, "pc": int(time.time()), "mode": mode(folder), "listening": listening(folder),
         "deviceName": (os.environ.get("VECTOR_RELAY_DEVICE_NAME") or socket.gethostname().split(".")[0])[:40],
         "chats": chat_list(folder), "waiting": waiting_ids(folder), "last": last, "events": chosen,
+        "board": board_rows(folder),
     }
+
+
+# ---------------------------------------------------------------- the board (what every chat is doing)
+# One row per chat: what it is about, whether it still runs, and its last few steps. Rows come from
+# two places. A chat posts its own steps with `step`; a chat in phone mode gets a row by itself, and
+# its updates are its steps. And a folder of session notes, when `board --notes` names one: Markdown
+# files with a head (title, status, started, machine, agent) and a "## Log" of "- HH:MM text" lines,
+# the way Cairn writes them. The board travels sealed like the feed, inside the copy the relay
+# keeps, so the page shows the chats of every computer, also of one that is asleep.
+NOTE_LOG = re.compile(r"^- (\d{1,2}):(\d{2})(?::\d{2})? (?:([a-z]{2,12}): )?(.*)$")
+NOTE_PROGRESS = re.compile(r"^\[(\d{1,3})%\]\s*")
+NOTE_DAY = re.compile(r"^(\d{4}-\d{2}-\d{2})")  # a note named after its day is not opened once that day is too long ago
+_notes: dict = {"folder": "", "at": 0.0, "files": {}, "rows": []}  # the notes folder as it was last read
+
+
+def one_line(text: str, most: int) -> str:
+    words, cut = cut_text(" ".join(str(text).split()), most)
+    return words[:most - 1].rstrip() + "…" if cut else words
+
+
+def board_own(folder: Path) -> dict[str, dict]:
+    """The rows the chats of this PC made themselves: chat id -> title, agent, state, progress, times, steps."""
+    found = read_json(folder / "board.json", {})
+    rows = {}
+    for chat, row in (found.items() if isinstance(found, dict) else []):
+        if not isinstance(row, dict) or not CHAT_ID.match(str(chat)):
+            continue
+        try:
+            rows[chat] = {
+                "title": str(row.get("title", "")), "agent": str(row.get("agent", "")),
+                "state": row["state"] if row.get("state") in ("live", *ENDINGS) else "live",
+                "progress": None if row.get("progress") is None else int(row["progress"]),
+                "started": int(row["started"]), "updated": int(row["updated"]), "own": row.get("own") is True,
+                "steps": [[int(step[0]), str(step[1])] for step in row.get("steps", [])],
+            }
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+    return rows
+
+
+def board_step(folder: Path, chat: str, text: str = "", title: str = "", agent: str = "",
+               progress: int | None = None, end: str = "", own: bool = True) -> dict:
+    """One step of one chat on the board. Makes the chat's row when it has none."""
+    now = int(time.time())
+    with locked(folder):
+        rows = {name: row for name, row in board_own(folder).items()
+                if row["state"] == "live" or now - row["updated"] < BOARD_KEPT_S}
+        row = rows.get(chat) or {"title": "", "agent": "", "state": "live", "progress": None,
+                                 "started": now, "updated": now, "own": False, "steps": []}
+        row["state"] = end or "live"  # a chat that says something after it ended runs again
+        if title:
+            row["title"] = one_line(title, BOARD_TITLE)
+        if agent:
+            row["agent"] = one_line(agent, 20)
+        if progress is not None:
+            row["progress"] = max(0, min(100, progress))
+        if one_line(text, BOARD_STEP):
+            row["steps"] = [*row["steps"], [now, one_line(text, BOARD_STEP)]][-BOARD_STEPS_KEPT:]
+        row["own"] = row["own"] or own
+        row["updated"] = now
+        rows[chat] = row
+        write_json(folder / "board.json", rows)
+    return row
+
+
+def note_time(text: str) -> int:
+    """"2026-11-21T10:01" on this PC's clock, in seconds. 0 for anything else."""
+    try:
+        return int(time.mktime(time.strptime(text.strip()[:16].replace(" ", "T"), "%Y-%m-%dT%H:%M")))
+    except (ValueError, OverflowError):
+        return 0
+
+
+def read_note(path: Path) -> dict | None:
+    """One session note as a row of the board. None for a file that is not one."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as note:
+            text = note.read(200_000)
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    head, _, body = text[3:].partition("\n---")
+    fields: dict[str, str] = {}
+    for line in head.splitlines():
+        name, colon, value = line.partition(":")
+        if colon and name.strip().isidentifier():
+            value = value.strip()
+            if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1].replace('\\"', '"')
+            fields[name.strip().lower()] = value
+    started, status = note_time(fields.get("started", "")), fields.get("status", "").lower()
+    if not started or not status:
+        return None
+    state = "live" if status == "live" else status if status in ENDINGS else "done"
+    day = time.localtime(started)
+    midnight = int(time.mktime((day.tm_year, day.tm_mon, day.tm_mday, 0, 0, 0, 0, 0, -1)))
+    steps, progress, last, in_log, goal = [], None, started - started % 60, False, ""
+    for line in body.splitlines():
+        if line.startswith("## "):
+            in_log = line.strip().lower() == "## log"
+            continue
+        if not in_log:
+            goal = goal or line.strip()
+            continue
+        found = NOTE_LOG.match(line)
+        if not found:
+            continue
+        moment = midnight + int(found[1]) * 3600 + int(found[2]) * 60
+        if moment < last:  # the log went on past midnight
+            midnight += 86400
+            moment += 86400
+        last = moment
+        kind, words = found[3] or "", found[4].strip()
+        marked = NOTE_PROGRESS.match(words)
+        if marked:
+            progress, words = min(100, int(marked[1])), words[marked.end():]
+        if kind == "start":  # the title says the same
+            continue
+        if kind not in ("", "note", "end"):
+            words = f"{kind.capitalize()}: {words}"
+        steps.append([moment, one_line(words, BOARD_STEP)])
+    updated = max(started, last, note_time(fields.get("turn_at", "")), note_time(fields.get("ended", "")))
+    row = {
+        "id": path.stem[:120], "src": "note", "title": one_line(fields.get("title") or goal or path.stem, BOARD_TITLE),
+        "agent": one_line(fields.get("agent", ""), 20), "machine": one_line(fields.get("machine", ""), 40),
+        "state": state, "progress": progress, "started": started, "updated": updated, "steps": steps[-BOARD_STEPS:],
+    }
+    if state == "live" and fields.get("turn") in ("working", "waiting"):
+        row["turn"] = fields["turn"]
+    return row
+
+
+def note_rows(notes: Path, machine: str = "", agent: str = "") -> list[dict]:
+    """The session notes in a folder as rows. A file is read again only when it changed."""
+    now = time.time()
+    if _notes["folder"] != str(notes):
+        _notes.update(folder=str(notes), at=0.0, files={}, rows=[])
+    if now - _notes["at"] >= NOTES_EVERY_S:
+        files = {}
+        oldest = time.strftime("%Y-%m-%d", time.localtime(now - BOARD_KEPT_S - 2 * 86400))
+        try:
+            entries = list(os.scandir(notes))
+        except OSError:
+            entries = []
+        for entry in entries:
+            named = NOTE_DAY.match(entry.name)
+            if not entry.name.endswith(".md") or (named is not None and named[1] < oldest):
+                continue
+            try:
+                found = entry.stat()
+            except OSError:
+                continue
+            mark = (found.st_mtime_ns, found.st_size)
+            old = _notes["files"].get(entry.name)
+            files[entry.name] = old if old is not None and old[0] == mark else (mark, read_note(Path(entry.path)))
+        _notes.update(at=now, files=files, rows=[row for mark, row in files.values() if row is not None])
+    return [row for row in _notes["rows"]
+            if (not machine or row["machine"].lower() == machine.lower()) and (not agent or row["agent"].lower() == agent.lower())]
+
+
+def board_rows(folder: Path, most: int = BOARD_ROWS, bytes_max: int = BOARD_BYTES) -> list[dict]:
+    """The board as it travels: the running chats first, then the ones that ended last, small enough for the relay."""
+    now, found, phone = time.time(), settings(folder), chats(folder)
+    rows = [
+        {"id": chat, "chat": chat, "title": row["title"] or phone.get(chat, {}).get("label", "") or f"Chat {chat}",
+         "agent": row["agent"], "machine": "", "state": row["state"], "progress": row["progress"],
+         "started": row["started"], "updated": row["updated"], "steps": row["steps"][-BOARD_STEPS:]}
+        for chat, row in board_own(folder).items()
+    ]
+    if found.get("notes"):
+        rows += note_rows(Path(str(found["notes"])), str(found.get("notesMachine", "")), str(found.get("notesAgent", "")))
+    shown = []
+    for row in rows:
+        waits = phone.get(row.get("chat", ""), {}).get("on", False)  # a chat in phone mode may wait all day
+        if row["state"] == "live" and now - row["updated"] > BOARD_QUIET_S and not waits:
+            row = {**row, "state": "silent"}
+        if row["state"] == "live" or now - row["updated"] < BOARD_KEPT_S:
+            shown.append(row)
+    shown.sort(key=lambda row: (row["state"] == "live", row["updated"]), reverse=True)
+    shown, steps = shown[:most], BOARD_STEPS
+    while shown and len(json.dumps(shown, ensure_ascii=False).encode("utf-8")) > bytes_max:
+        if steps > 1:
+            steps -= 1
+            shown = [{**row, "steps": row["steps"][-steps:]} for row in shown]
+        else:
+            shown = shown[:-1]
+    return shown
+
+
+def board_wanted(folder: Path) -> bool:
+    """True while the board may change with no chat in phone mode: the helper stays for it."""
+    if settings(folder).get("notes"):
+        return True
+    now = time.time()
+    return any(row["state"] == "live" and now - row["updated"] < IDLE_ON_S for row in board_own(folder).values())
+
+
+def fit_copy(folder: Path, key: bytes) -> tuple[dict, str]:
+    """The copy the relay keeps for a PC that is off, and the same sealed: never more than the relay takes."""
+    most = STATE_BYTES
+    while True:
+        state = feed_answer(folder, limit=STATE_EVENTS, text_max=STATE_TEXT, bytes_max=most)
+        sealed = seal(key, state)
+        if len(sealed) <= RELAY_STATE_CHARS or most < 4_000:
+            return state, sealed
+        most //= 2
 
 
 # ---------------------------------------------------------------- the inbox (phone -> PC)
@@ -448,6 +675,8 @@ def answer_ask(folder: Path, key: bytes, seen: list[str], body: str, clock=time.
         after = 0
     if route == "feed":
         return feed_answer(folder, after)
+    if route == "board":  # All chats asks every computer, also the ones whose feed the page does not show
+        return {"ok": True, "v": VERSION, "pc": int(time.time()), "chats": chat_list(folder), "board": board_rows(folder)}
     if route == "event":
         for event in read_feed(folder):
             if event["n"] == ask.get("n"):
@@ -659,6 +888,48 @@ def log(folder: Path, text: str) -> None:
         lines.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
 
 
+def view_port(folder: Path) -> int:
+    """Where the helper hands the page to this PC's own browser (`view`)."""
+    return 48800 + zlib.crc32(str(folder.resolve()).lower().encode("utf-8")) % 150
+
+
+class PageOnly(BaseHTTPRequestHandler):
+    """The files of the page, for a browser on this PC. No data: that comes sealed from the relay."""
+
+    protocol_version = "HTTP/1.1"
+    timeout = 75
+
+    def log_message(self, *arguments) -> None:
+        pass
+
+    def do_GET(self) -> None:
+        file = PAGE_FILES.get(urllib.parse.urlsplit(self.path).path.lstrip("/"))
+        try:
+            data, code = ((DOCS / file).read_bytes(), 200) if file else (b"Not found.", 404)
+        except OSError:
+            data, code = b"Not found.", 404
+        self.send_response(code)
+        self.send_header("Content-Type", PAGE_TYPES[Path(file).suffix] if code == 200 else "text/plain")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def serve_page(folder: Path) -> ThreadingHTTPServer | None:
+    """The page on a port only this PC can reach. None when the port is taken: `view` then opens the page at the relay."""
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", view_port(folder)), PageOnly)
+    except OSError as error:
+        log(folder, f"view: port {view_port(folder)} is taken ({error})")
+        return None
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
 def serve(folder: Path) -> int:
     """Passes questions and answers between the relay and this folder until nobody needs it."""
     guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -688,6 +959,7 @@ def serve(folder: Path) -> int:
     if found.get("local"):
         return serve_local(folder, found, guard)
     relay = Relay(found)
+    page = serve_page(folder)
     seen = read_json(folder / "seen.json", [])
     seen = [item for item in seen if isinstance(item, str)] if isinstance(seen, list) else []
     stop = folder / "stop"
@@ -721,15 +993,17 @@ def serve(folder: Path) -> int:
         while not stop.exists():
             now = time.time()
             idle = now - max(last_active(folder), status["started"])
-            if idle > (IDLE_ON_S if mode(folder)["on"] else IDLE_OFF_S) and not listening(folder):
+            if (idle > (IDLE_ON_S if mode(folder)["on"] else IDLE_OFF_S) and not listening(folder)
+                    and not board_wanted(folder)):
                 log(folder, "nobody needs the helper any more")
                 break
             try:
                 state = feed_answer(folder, limit=STATE_EVENTS, text_max=STATE_TEXT, bytes_max=STATE_BYTES)
-                shown = (state["last"], json.dumps(state["chats"], sort_keys=True), len(state["waiting"]))
+                shown = (state["last"], json.dumps(state["chats"], sort_keys=True), len(state["waiting"]),
+                         json.dumps(state["board"], sort_keys=True))
                 due = shown != published and now - published_at >= PUBLISH_GAP_S
                 if published is None or due or now - published_at >= HEARTBEAT_S:
-                    code, _ = relay.call("PUT", "/state", seal(relay.key, state), owner=True)
+                    code, _ = relay.call("PUT", "/state", fit_copy(folder, relay.key)[1], owner=True)
                     if code == 403:
                         note("the relay says this channel belongs to another PC: run `vector_relay.py forget`, then pair again")
                         time.sleep(ASK_RETRY_S)
@@ -774,6 +1048,8 @@ def serve(folder: Path) -> int:
             time.sleep(ASK_BUSY_S if since < ASK_BUSY_FOR_S else ASK_RECENT_S if since < ASK_RECENT_FOR_S else ASK_IDLE_S)
     finally:
         relay.close()
+        if page is not None:
+            page.server_close()
         stop.unlink(missing_ok=True)
         guard.close()
         log(folder, "helper stopped")
@@ -917,7 +1193,8 @@ def serve_local(folder: Path, found: dict, guard: socket.socket) -> int:
         while not stop.exists():
             now = time.time()
             idle = now - max(last_active(folder), status["started"])
-            if idle > (IDLE_ON_S if mode(folder)["on"] else IDLE_OFF_S) and not listening(folder):
+            if (idle > (IDLE_ON_S if mode(folder)["on"] else IDLE_OFF_S) and not listening(folder)
+                    and not board_wanted(folder)):
                 log(folder, "nobody needs the helper any more")
                 break
             if written != status["contact"] // 5:
@@ -1041,8 +1318,7 @@ def show_to_phone(folder: Path) -> None:
         return  # the helper keeps the relay's copy fresh by itself
     relay = Relay(found)
     try:
-        state = feed_answer(folder, limit=STATE_EVENTS, text_max=STATE_TEXT, bytes_max=STATE_BYTES)
-        status, _ = relay.call("PUT", "/state", seal(relay.key, state), owner=True)
+        status, _ = relay.call("PUT", "/state", fit_copy(folder, relay.key)[1], owner=True)
         if status != 200:
             log(folder, f"code: the relay answered {status} to this computer's state")
     except OSError as error:
@@ -1221,6 +1497,7 @@ def command_on(folder: Path, label: str, named: str) -> int:
         found[chat] = {"label": label, "on": True, "since": now}
         write_json(folder / "chats.json", found)
     touch(folder)
+    board_step(folder, chat, title=label, own=False)  # a chat in phone mode is on the board without asking
     if not was_on:
         add_event(folder, "note", "Phone mode on" + (f": {label}" if label else ""), chat=chat)
     for old in files(folder).glob("*"):
@@ -1252,6 +1529,8 @@ def command_off(folder: Path, named: str, everything: bool) -> int:
         write_json(folder / "chats.json", found)
     for chat in leaving:
         add_event(folder, "note", "Phone mode off", chat=chat)
+        if not board_own(folder).get(chat, {"own": True})["own"]:  # only phone mode put it on the board
+            board_step(folder, chat, "Left phone mode", end="done", own=False)
     if leaving:
         touch(folder)  # the helper stays a few minutes so the phone sees this
     left = len(chats_on(folder))
@@ -1287,6 +1566,9 @@ def command_say(folder: Path, kind: str, words: list[str], file: str, image: str
             return 2
     event = add_event(folder, kind, text, **more)
     touch(folder)
+    if chat and kind in ("update", "result", "error"):  # what it says to the phone is its step on the board
+        first = next((line.strip(" #*") for line in text.splitlines() if line.strip(" #*")), "Posted a picture" if image else "")
+        board_step(folder, chat, {"result": "Result: ", "error": "Needs you: "}.get(kind, "") + first, own=False)
     on = bool(chat) and chats(folder)[chat]["on"]
     if on:
         start_helper(folder)
@@ -1349,6 +1631,99 @@ def command_listen(folder: Path, wait: float, named: str) -> int:
             pass
 
 
+def command_step(folder: Path, words: list[str], named: str, title: str, agent: str,
+                 progress: int | None, end: str) -> int:
+    text = " ".join(words).strip()
+    known = {**chats(folder), **board_own(folder)}
+    if named and named not in known:
+        print(f"No chat {named}. A chat that is not on the board yet starts with:  {ME} step --title \"what it is about\" \"first step\"")
+        return 2
+    chat = named
+    if not chat and title:  # a new row
+        while not chat or chat in known:
+            chat = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(4))
+    elif not chat:
+        chat, why = pick_chat(folder)
+        if not chat:
+            print("Say which chat with --chat <id>." if why == "several" else
+                  f"Which chat? Start its row with:  {ME} step --title \"what it is about\" \"first step\"")
+            if why == "several":
+                say_chats(folder)
+            return 2
+    if not text and not title and progress is None and not end:
+        print("Nothing to say.")
+        return 2
+    board_step(folder, chat, text, title, agent, progress, end)
+    touch(folder)
+    if not paired(settings(folder)):
+        print(f"ok chat={chat}  (no phone or page is linked yet: `{ME} pair --open`, or `{ME} board` shows it here)")
+        return 0
+    running = start_helper(folder)
+    print(f"ok chat={chat}" + ("" if running else f"  The helper did not start: see `{ME} status`."))
+    return 0
+
+
+def command_board(folder: Path, notes: str, no_notes: bool, machine: str, agent: str) -> int:
+    found = settings(folder)
+    if no_notes:
+        for name in ("notes", "notesMachine", "notesAgent"):
+            found.pop(name, None)
+        write_json(folder / "settings.json", found)
+        print("The board no longer reads a folder of notes.")
+        return 0
+    if notes:
+        place = Path(notes).expanduser().resolve()
+        if not place.is_dir():
+            print(f"No such folder: {place}")
+            return 2
+        found.update(notes=str(place), notesMachine=machine, notesAgent=agent)
+        write_json(folder / "settings.json", found)
+        touch(folder)
+        if paired(found):
+            start_helper(folder)
+    rows, now = board_rows(folder, most=10_000, bytes_max=10_000_000), time.time()
+    running = [row for row in rows if row["state"] == "live"]
+    print(f"Board: {len(running)} running, {len(rows) - len(running)} ended in the last {BOARD_KEPT_S // 86400} days")
+    if found.get("notes"):
+        only = ", ".join(f"{name} {found[key]}" for name, key in (("computer", "notesMachine"), ("agent", "notesAgent")) if found.get(key))
+        print(f"Notes: {found['notes']}" + (f"  (only {only})" if only else ""))
+    for row in rows[:BOARD_ROWS]:
+        today = time.localtime(row["updated"])[:3] == time.localtime(now)[:3]
+        at = time.strftime("%H:%M " if today else "%d %b", time.localtime(row["updated"]))
+        state = "running" + (f" {row['progress']}%" if row["progress"] is not None else "") if row["state"] == "live" else row["state"]
+        who = " · ".join(part for part in (row["machine"], row["agent"]) if part)
+        print(f"  {at}  {state:<12} {row['title']}" + (f"  [{who}]" if who else ""))
+        if row["steps"]:
+            print(f"         {time.strftime('%H:%M', time.localtime(row['steps'][-1][0]))} {row['steps'][-1][1]}")
+    if len(rows) > BOARD_ROWS:
+        print(f"  ... and {len(rows) - BOARD_ROWS} older. The page shows the first {BOARD_ROWS} too.")
+    return 0
+
+
+def command_view(folder: Path) -> int:
+    """Opens the page on this PC, linked to this PC already: no phone, no code."""
+    found = settings(folder)
+    if not paired(found):
+        print(f"Not linked yet. Run:  {ME} pair --open")
+        return 2
+    address = found.get("page", found["relay"] + "/")
+    if start_helper(folder) and not found.get("local"):
+        for attempt in range(30):  # the helper hands out the page itself, the same version as this file
+            try:
+                with socket.create_connection(("127.0.0.1", view_port(folder)), timeout=0.3):
+                    address = f"http://127.0.0.1:{view_port(folder)}/"
+                    break
+            except OSError:
+                time.sleep(0.1)
+    import webbrowser
+
+    opened = webbrowser.open(address + "?view=chats#r=" + ticket(found))
+    where = "from this PC" if address.startswith("http://127.0.0.1") else f"at {urllib.parse.urlsplit(address).netloc}"
+    print(f"All chats is open in your browser ({where})." if opened else "No browser could be opened on this PC.")
+    print("Another computer: there, `pair --code`; here on the page, Device, + Add device, its 4 digits.")
+    return 0 if opened else 1
+
+
 def command_status(folder: Path) -> int:
     found, helper = settings(folder), read_json(folder / "serve.json", {})
     running = helper_running(folder)
@@ -1379,6 +1754,9 @@ def command_status(folder: Path) -> int:
     if running and helper.get("error"):
         print(f"Trouble:    {helper['error']}")
     print(f"Feed:       {len(events)} events")
+    rows = board_rows(folder, most=10_000, bytes_max=10_000_000)
+    print(f"Board:      {sum(row['state'] == 'live' for row in rows)} running, {len(rows)} in all"
+          + (f"  (with the notes in {found['notes']})" if found.get("notes") else "") + f"   `{ME} board` lists them")
     return 0
 
 
@@ -1498,6 +1876,19 @@ def main(arguments: list[str] | None = None) -> int:
     listen = commands.add_parser("listen", help="wait for the next prompt from the phone")
     listen.add_argument("--wait", type=float, default=0, help="seconds to wait; 0 waits until one comes")
     listen.add_argument("--chat", default="", help="which chat, when several are on")
+    step = commands.add_parser("step", help="say what a chat is doing, on the board of every chat")
+    step.add_argument("--chat", default="", help="the chat's id; the first step of a new chat prints one")
+    step.add_argument("--title", default="", help="what the chat is about: starts its row, or renames it")
+    step.add_argument("--agent", default="", help="what runs the chat, e.g. vector")
+    step.add_argument("--progress", type=int, default=None, help="how far it is, 0 to 100")
+    step.add_argument("--end", choices=ENDINGS, default="", help="the chat is over, and how it ended")
+    step.add_argument("words", nargs="*")
+    board = commands.add_parser("board", help="every chat on this PC and its last step")
+    board.add_argument("--notes", default="", help="also show the chats written down as session notes in this folder")
+    board.add_argument("--machine", default="", help="with --notes: only the notes of this computer (default: all)")
+    board.add_argument("--agent", default="", help="with --notes: only the notes of this agent (default: all)")
+    board.add_argument("--no-notes", action="store_true", help="stop reading the folder of notes")
+    commands.add_parser("view", help="open the page on this PC's own browser, on All chats")
     commands.add_parser("status", help="what is linked and running")  # listen: 0 prompt or none, 3 off, 4 replaced
     commands.add_parser("serve", help="run the helper in this window (it normally starts by itself)")
     commands.add_parser("pair-wait", help="wait for the phone that types the code (`pair --code` starts this by itself)")
@@ -1524,6 +1915,12 @@ def main(arguments: list[str] | None = None) -> int:
         return command_say(folder, chosen.kind, chosen.words, chosen.file, chosen.image, chosen.chat)
     if chosen.command == "listen":
         return command_listen(folder, chosen.wait, chosen.chat)
+    if chosen.command == "step":
+        return command_step(folder, chosen.words, chosen.chat, chosen.title, chosen.agent, chosen.progress, chosen.end)
+    if chosen.command == "board":
+        return command_board(folder, chosen.notes, chosen.no_notes, chosen.machine, chosen.agent)
+    if chosen.command == "view":
+        return command_view(folder)
     if chosen.command == "status":
         return command_status(folder)
     if chosen.command == "serve":

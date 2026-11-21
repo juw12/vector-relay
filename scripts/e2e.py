@@ -188,6 +188,203 @@ def local_trip(playwright, expect) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def session_note(folder: Path, name: str, title: str, status: str, machine: str, agent: str, log: list[str]) -> None:
+    """A session note as Cairn writes one, started 50 minutes ago."""
+    started = time.time() - 50 * 60
+    lines = [f"- {time.strftime('%H:%M', time.localtime(started + number * 600))} {line}" for number, line in enumerate(log)]
+    (folder / name).write_text(
+        f'---\ntitle: "{title}"\ntype: session\nstatus: {status}\nstarted: {time.strftime("%Y-%m-%dT%H:%M", time.localtime(started))}\n'
+        f"machine: {machine}\nagent: {agent}\n---\n## Goal\n\n{title}\n\n## Log\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
+
+
+def board_trip(playwright, expect, relay_address: str = "", page_address: str = "") -> None:
+    """All chats: the boards of several computers on one page, on a wide screen and on a phone.
+
+    The copy a relay keeps of a computer is renewed every PUBLISH_GAP_S at most, so each computer's
+    rows are written before its helper starts: the first copy it leaves then holds them all.
+    """
+    scratch = REPO / ".tmp"
+    scratch.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=scratch, ignore_cleanup_errors=True) as temporary:
+        root = Path(temporary)
+        fake = None if relay_address else FakeRelay()
+        relay_address = relay_address or fake.address
+        site = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(REPO / "docs")))
+        threading.Thread(target=site.serve_forever, daemon=True).start()
+        base = page_address or f"http://127.0.0.1:{site.server_port}/"
+        slow = 25_000 if fake is None else 15_000
+        hosts, browser, listener, errors = [], None, None, []
+        try:
+            for name in ("mac", "asus", "old"):
+                host = root / name
+                host.mkdir()
+                hosts.append(host)
+                assert run(host, "pair", "--relay", relay_address, "--page", base).returncode == 0
+            mac, asus, old = hosts
+            notes = root / "notes"
+            notes.mkdir()
+            day = time.strftime("%Y-%m-%d")
+            session_note(notes, f"{day}-lab.md", "Lab: automated runs", "live", "Office PC", "opencode",
+                         ["start: Lab: automated runs", "note: [70%] 53 runs, 4 stopped with an error"])
+            session_note(notes, f"{day}-digest.md", "Job digest: daily run", "shipped", "Office PC", "opencode",
+                         ["start: Job digest: daily run", "end: shipped: 12 new jobs in the digest"])
+            for host in (mac, asus):  # both computers read the same folder: a note must still show once
+                relay.write_json(host / "settings.json", {**relay.settings(host), "notes": str(notes)})
+            relay.board_step(mac, "tttt", "tests green", title="Titip 0.10.0: reminders and rules", agent="vector", progress=40)
+            relay.board_step(mac, "wwww", "writing", title="Weekly report", agent="vector")
+            relay.board_step(mac, "wwww", "sent to Juwen", end="shipped")
+            atlas = run(mac, "on", "--label", "Atlas FA").stdout.split("chat=")[1][:4]
+            run(mac, "say", "--chat", atlas, "reading the leak data")
+            listener = listen(mac, atlas)
+            check("ok chat=" in run(asus, "step", "--title", "ReqPilot case studies", "--agent", "vector", "3 requirements submitted").stdout,
+                  "all chats: a chat that is not in phone mode posts a step, and that starts the helper")
+            # a computer whose Vector Relay is from before the board: its copy at the relay has chats and no board
+            relay.write_json(old / "chats.json", {"abcd": {"label": "Legacy chat", "on": True, "since": int(time.time())}})
+            before = relay.feed_answer(old, limit=relay.STATE_EVENTS, text_max=relay.STATE_TEXT, bytes_max=relay.STATE_BYTES)
+            before.pop("board")
+            door = relay.Relay(relay.settings(old))
+            assert door.call("PUT", "/state", relay.seal(door.key, before), owner=True)[0] == 200
+            door.close()
+            for host in (mac, asus):
+                door, deadline = relay.Relay(relay.settings(host)), time.time() + 30
+                while time.time() < deadline and door.call("GET", "/state")[0] != 200:
+                    time.sleep(0.3)
+                door.close()
+            links = [base + "#r=" + relay.ticket(relay.settings(host)) for host in hosts]
+
+            # ---- a wide screen, opened the way `view` opens it
+            browser = playwright.chromium.launch()
+            context = browser.new_context(viewport={"width": 1280, "height": 860})
+            page = context.new_page()
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+            page.goto(base + "?view=chats#r=" + relay.ticket(relay.settings(mac)))
+            expect(page.locator("#title")).to_have_text("All chats", timeout=slow)
+            expect(page.locator("#board .row.live")).to_have_count(3, timeout=slow)
+            check(page.locator("#composer").is_hidden() and page.locator("#feed").is_hidden() and "view=chats" not in page.url and "#r=" not in page.url,
+                  "all chats: `view` opens the page on All chats, with no prompt box, and the address keeps neither the key nor the view")
+            page.locator("#renameDevice").click()
+            page.locator("#deviceName").fill("MacBook")
+            page.locator("#saveDevice").click()
+            states = page.locator("#board .row").evaluate_all("rows => rows.map(row => row.classList.contains('live'))")
+            check(states == [True, True, True, False, False], "all chats: the running chats come first, then the ones that ended")
+            atlas_row = page.locator("#board .row", has_text="Atlas FA")
+            expect(atlas_row.locator(".state")).to_have_text("waiting for your prompt", timeout=slow)
+            check(atlas_row.locator(".row-step").inner_text() == "reading the leak data",
+                  "all chats: a chat in phone mode is listed by itself, with what it last said and that it waits for a prompt")
+            titip = page.locator("#board .row", has_text="Titip 0.10.0")
+            expect(titip.locator(".row-meta")).to_have_text("MacBook · vector · running · 40%")
+            check(titip.locator(".row-step").inner_text() == "tests green",
+                  "all chats: a chat that posts its own steps shows its computer, how far it is and its last step")
+            lab = page.locator("#board .row", has_text="Lab: automated runs")
+            check(lab.locator(".row-meta").inner_text() == "Office PC · opencode · running · 70%" and "53 runs" in lab.locator(".row-step").inner_text(),
+                  "all chats: a session note is a row under the computer the note names")
+            check(page.locator("#board .row", has_text="Weekly report").locator(".state").inner_text() == "shipped"
+                  and page.locator("#board .row", has_text="Job digest").locator(".row-step").inner_text() == "shipped: 12 new jobs in the digest",
+                  "all chats: a chat that ended stays, with how it ended")
+
+            # ---- a second computer, and one from before the board
+            for name, address in (("ASUS laptop", links[1]), ("Old PC", links[2])):
+                page.locator("#addDevice").click()
+                page.locator("#useLink").click()
+                page.locator("#deviceName").fill(name)
+                page.locator("#deviceLink").fill(address)
+                page.locator("#saveDevice").click()
+                expect(page.locator("#board .computer", has_text=name)).to_be_visible(timeout=slow)
+            expect(page.locator("#board .row.live")).to_have_count(5, timeout=slow)
+            check(page.locator("#title").inner_text() == "All chats" and page.locator("#status").inner_text().startswith("5 running on 4 computers"),
+                  "all chats: adding a computer keeps All chats open, and the bar counts what runs on all of them")
+            check(page.locator("#board .row", has_text="ReqPilot case studies").locator(".row-meta").inner_text() == "ASUS laptop · vector · running",
+                  "all chats: the second computer's chat is listed under the name it has on this page")
+            check(page.locator("#board .row", has_text="Lab: automated runs").count() == 1,
+                  "all chats: a note two computers both read is listed once")
+            expect(atlas_row.locator(".state")).to_have_text("waiting for your prompt", timeout=slow)
+            check(atlas_row.locator(".row-meta").inner_text().startswith("MacBook · ") and atlas_row.locator(".row-step").inner_text() == "reading the leak data",
+                  "all chats: a computer whose feed is not open is asked too: its chat shows live, not as the relay last kept it")
+            check(page.locator("#board .row", has_text="Legacy chat").locator(".row-meta").inner_text().startswith("Old PC · ")
+                  and "from before All chats" in page.locator("#board .computer.bad", has_text="Old PC").inner_text(),
+                  "all chats: a computer with an older Vector Relay shows its chats in phone mode, and says it needs an update")
+
+            # ---- one row opened, and from there into the chat
+            titip.locator(".row-head").click()
+            expect(titip.locator(".row-more li")).to_have_count(1)
+            check("Started" in titip.locator(".times").inner_text() and titip.locator(".open-chat").count() == 0,
+                  "all chats: a row opens to its steps with their times; a chat that is not in phone mode has no Open button")
+            page.screenshot(path=str(REPO / "shots" / "desktop-all-chats.png"))
+            page.locator("#board .only button", has_text="Office PC").click()
+            expect(page.locator("#board .row")).to_have_count(2)
+            check(page.locator("#status").inner_text() == "1 running on Office PC", "all chats: one computer can be looked at alone")
+            page.locator("#board .only button", has_text="All computers").click()
+            atlas_row.locator(".row-head").click()
+            atlas_row.locator(".open-chat").click()
+            expect(page.locator("#sendTarget")).to_have_text("To: MacBook", timeout=slow)
+            expect(page.locator("#title")).to_have_text("Atlas FA", timeout=slow)
+            check(page.locator("#composer").is_visible() and page.locator("#board").is_hidden(),
+                  "all chats: Open this chat switches to that chat's computer and shows its prompt box")
+            expect(page.locator("#boardCount")).to_have_text("5 running", timeout=slow)
+            page.locator("#showBoard").click()
+            expect(page.locator("#board .row.live")).to_have_count(5)
+            check(page.locator("#showBoard").get_attribute("aria-pressed") == "true", "all chats: the chat list has All chats on top, with how many run")
+            context.close()
+            browser.close()
+
+            # ---- the same on a phone that knows two of the computers
+            browser = playwright.webkit.launch()
+            context = browser.new_context(**playwright.devices["iPhone 14"])
+            context.add_init_script("Object.defineProperty(navigator, 'standalone', {get: () => true});")
+            page = context.new_page()
+            # WebKit reports a request that a reload cut off as an error of the page: that one is not the page's
+            page.on("pageerror", lambda error: None if "access control checks" in str(error) else errors.append(str(error)))
+            page.goto(links[0])
+            expect(page.locator("#title")).to_have_text("Atlas FA", timeout=slow)
+            page.locator("#menu").tap()
+            page.locator("#renameDevice").tap()
+            page.locator("#deviceName").fill("MacBook")
+            page.locator("#saveDevice").tap()
+            page.locator("#addDevice").tap()
+            page.locator("#useLink").tap()
+            page.locator("#deviceName").fill("ASUS laptop")
+            page.locator("#deviceLink").fill(links[1])
+            page.locator("#saveDevice").tap()
+            expect(page.locator("#sendTarget")).to_have_text("To: ASUS laptop", timeout=slow)
+            check(page.locator("#board").is_hidden() and page.locator("#composer").is_visible(), "all chats: a phone opens on a chat as before")
+            page.locator("#menu").tap()
+            expect(page.locator("#boardCount")).to_have_text("4 running", timeout=slow)
+            page.locator("#showBoard").tap()
+            expect(page.locator("#board .row.live")).to_have_count(4, timeout=slow)
+            expect(page.locator("#chats")).to_be_hidden()
+            check(page.locator("#composer").is_hidden() and page.locator("#feed").is_hidden(), "all chats: on a phone it takes the whole page")
+            page.screenshot(path=str(REPO / "shots" / "phone-all-chats.png"))
+            page.reload()
+            expect(page.locator("#board .row.live")).to_have_count(4, timeout=slow)
+            check(page.locator("#title").inner_text() == "All chats", "all chats: the page opens again where it was left")
+            atlas_row = page.locator("#board .row", has_text="Atlas FA")
+            atlas_row.locator(".row-head").tap()
+            atlas_row.locator(".open-chat").tap()
+            expect(page.locator("#sendTarget")).to_have_text("To: MacBook", timeout=slow)
+            expect(page.locator("#title")).to_have_text("Atlas FA", timeout=slow)
+            check(page.locator("#composer").is_visible(), "all chats: on a phone, Open this chat leads to the chat on its own computer")
+            page.locator("#menu").tap()
+            page.locator("#showBoard").tap()
+            expect(page.locator("#board")).to_be_visible()
+            page.locator("#menu").tap()
+            page.locator("#chats .chip").first.tap()
+            expect(page.locator("#composer")).to_be_visible()
+            check(page.locator("#board").is_hidden(), "all chats: a tap on a chat in the list goes back to that chat")
+            check(not errors, "all chats: no errors on the page" + (": " + "; ".join(errors[:3]) if errors else ""))
+        finally:
+            if browser is not None:
+                browser.close()
+            if listener is not None:
+                listener.kill()
+            for host in hosts:
+                run(host, "stop" if fake else "forget")
+            if fake is not None:
+                fake.close()
+            site.shutdown()
+            site.server_close()
+
+
 def device_trip(playwright, expect, relay_address: str = "", page_address: str = "") -> None:
     """Two independent pairings, even with identical chat IDs and labels. Through a deployed relay when one is named."""
     scratch = REPO / '.tmp'
@@ -653,6 +850,7 @@ def main() -> int:
             if not chosen.relay:
                 local_trip(playwright, expect)
             device_trip(playwright, expect, chosen.relay, chosen.page)
+            board_trip(playwright, expect, chosen.relay, chosen.page)
     finally:
         forgot = run(folder, "forget")
         if chosen.relay:
