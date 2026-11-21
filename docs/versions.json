@@ -2,6 +2,15 @@
   "note": "The one list of versions. The phone page shows it under Version history; CHANGELOG.md and the Versions part of the README are made from it by scripts/make_changelog.py.",
   "releases": [
     {
+      "version": "1.3.4",
+      "date": "2026-11-22",
+      "pr": 9,
+      "title": "Remove waits longer for a busy computer",
+      "changes": [
+        "Remove from the list gives a computer 20 seconds to say it removed the row, where it gave 9. A busy computer behind an office proxy took longer than 9: the page said it did not answer, and the row left a moment later all the same."
+      ]
+    },
+    {
       "version": "1.3.3",
       "date": "2026-11-21",
       "pr": 8,

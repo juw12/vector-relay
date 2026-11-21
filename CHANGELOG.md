@@ -3,6 +3,10 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
+## 1.3.4 - 2026-11-22: Remove waits longer for a busy computer ([#9](https://github.com/juw12/vector-relay/pull/9))
+
+- Remove from the list gives a computer 20 seconds to say it removed the row, where it gave 9. A busy computer behind an office proxy took longer than 9: the page said it did not answer, and the row left a moment later all the same.
+
 ## 1.3.3 - 2026-11-21: The computers answer again, and a row can be removed ([#8](https://github.com/juw12/vector-relay/pull/8))
 
 - Fixed: no computer answered the page for hours. The relay's host cut the requests the relay held for 20 seconds (Cloudflare error 1102, shown as 503). The relay now holds a request for 8 seconds at most and looks into its database at most 10 times in one request; the helper asks for 8 seconds and, when a request is cut all the same, asks again at once with half the hold.
