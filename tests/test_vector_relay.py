@@ -484,6 +484,17 @@ Titip 0.10.0
         self.assertEqual(relay.board_rows(self.folder), [])
         self.assertFalse(relay.board_wanted(self.folder))
 
+    def test_the_name_the_notes_give_this_computer_travels_with_the_board(self) -> None:
+        notes = self.folder / "notes"
+        notes.mkdir()
+        self.assertEqual(relay.feed_answer(self.folder)["machine"], "")
+        said = run(self.folder, "board", "--notes", str(notes), "--this", "MacBook Pro 15,4")
+        self.assertIn('This computer is "MacBook Pro 15,4" there.', said.stdout)
+        self.assertEqual(relay.feed_answer(self.folder)["machine"], "MacBook Pro 15,4")
+        self.assertEqual(relay.answer_ask(self.folder, self.key, [], relay.seal(self.key, {"route": "board"}))["machine"], "MacBook Pro 15,4")
+        run(self.folder, "board", "--no-notes")
+        self.assertEqual(relay.feed_answer(self.folder)["machine"], "")
+
     def test_a_note_is_read_again_only_when_it_changed(self) -> None:
         notes = self.folder / "notes"
         notes.mkdir()

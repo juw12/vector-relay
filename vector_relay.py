@@ -64,7 +64,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -405,7 +405,7 @@ def feed_answer(folder: Path, after: int = 0, limit: int = FEED_EVENTS, text_max
         "ok": True, "v": VERSION, "pc": int(time.time()), "mode": mode(folder), "listening": listening(folder),
         "deviceName": device_name(),
         "chats": chat_list(folder), "waiting": waiting_ids(folder), "last": last, "events": chosen,
-        "board": board_rows(folder),
+        "board": board_rows(folder), "machine": str(settings(folder).get("notesThis", ""))[:40],
     }
 
 
@@ -703,7 +703,8 @@ def answer_ask(folder: Path, key: bytes, seen: list[str], body: str, clock=time.
     if route == "feed":
         return feed_answer(folder, after)
     if route == "board":  # All chats asks every computer, also the ones whose feed the page does not show
-        return {"ok": True, "v": VERSION, "pc": int(time.time()), "chats": chat_list(folder), "board": board_rows(folder)}
+        return {"ok": True, "v": VERSION, "pc": int(time.time()), "chats": chat_list(folder), "board": board_rows(folder),
+                "machine": str(settings(folder).get("notesThis", ""))[:40]}
     if route == "event":
         for event in read_feed(folder):
             if event["n"] == ask.get("n"):
@@ -1690,10 +1691,10 @@ def command_step(folder: Path, words: list[str], named: str, title: str, agent: 
     return 0
 
 
-def command_board(folder: Path, notes: str, no_notes: bool, machine: str, agent: str) -> int:
+def command_board(folder: Path, notes: str, no_notes: bool, machine: str, agent: str, this: str = "") -> int:
     found = settings(folder)
     if no_notes:
-        for name in ("notes", "notesMachine", "notesAgent"):
+        for name in ("notes", "notesMachine", "notesAgent", "notesThis"):
             found.pop(name, None)
         write_json(folder / "settings.json", found)
         print("The board no longer reads a folder of notes.")
@@ -1703,7 +1704,7 @@ def command_board(folder: Path, notes: str, no_notes: bool, machine: str, agent:
         if not place.is_dir():
             print(f"No such folder: {place}")
             return 2
-        found.update(notes=str(place), notesMachine=machine, notesAgent=agent)
+        found.update(notes=str(place), notesMachine=machine, notesAgent=agent, notesThis=this)
         write_json(folder / "settings.json", found)
         touch(folder)
         if paired(found):
@@ -1713,7 +1714,8 @@ def command_board(folder: Path, notes: str, no_notes: bool, machine: str, agent:
     print(f"Board: {len(running)} running, {len(rows) - len(running)} ended in the last {BOARD_KEPT_S // 86400} days")
     if found.get("notes"):
         only = ", ".join(f"{name} {found[key]}" for name, key in (("computer", "notesMachine"), ("agent", "notesAgent")) if found.get(key))
-        print(f"Notes: {found['notes']}" + (f"  (only {only})" if only else ""))
+        print(f"Notes: {found['notes']}" + (f"  (only {only})" if only else "")
+              + (f"  This computer is \"{found['notesThis']}\" there." if found.get("notesThis") else ""))
     for row in rows[:BOARD_ROWS]:
         today = time.localtime(row["updated"])[:3] == time.localtime(now)[:3]
         at = time.strftime("%H:%M " if today else "%d %b", time.localtime(row["updated"]))
@@ -1914,6 +1916,7 @@ def main(arguments: list[str] | None = None) -> int:
     board.add_argument("--notes", default="", help="also show the chats written down as session notes in this folder")
     board.add_argument("--machine", default="", help="with --notes: only the notes of this computer (default: all)")
     board.add_argument("--agent", default="", help="with --notes: only the notes of this agent (default: all)")
+    board.add_argument("--this", default="", help="with --notes: the name the notes give this computer, so the page lists them under one name")
     board.add_argument("--no-notes", action="store_true", help="stop reading the folder of notes")
     commands.add_parser("view", help="open the page on this PC's own browser, on All chats")
     commands.add_parser("status", help="what is linked and running")  # listen: 0 prompt or none, 3 off, 4 replaced
@@ -1945,7 +1948,7 @@ def main(arguments: list[str] | None = None) -> int:
     if chosen.command == "step":
         return command_step(folder, chosen.words, chosen.chat, chosen.title, chosen.agent, chosen.progress, chosen.end)
     if chosen.command == "board":
-        return command_board(folder, chosen.notes, chosen.no_notes, chosen.machine, chosen.agent)
+        return command_board(folder, chosen.notes, chosen.no_notes, chosen.machine, chosen.agent, chosen.this)
     if chosen.command == "view":
         return command_view(folder)
     if chosen.command == "status":

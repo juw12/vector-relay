@@ -3,6 +3,11 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
+## 1.3.2 - 2026-11-21: One computer, one name on All chats ([#6](https://github.com/juw12/vector-relay/pull/6))
+
+- `board --notes <folder> --this "<name>"` says which name the session notes give this computer. All chats then lists those notes under the name the computer has on the page, where it counted as one more computer before.
+- The pictures in the README are drawn under a made-up computer name, never the real name of the computer that ran the checks.
+
 ## 1.3.1 - 2026-11-21: All chats on real notes: three fixes ([#5](https://github.com/juw12/vector-relay/pull/5))
 
 - A session note whose log has a line out of order no longer counts as ended tomorrow: it stood on top of Ended, marked "now".

@@ -67,13 +67,14 @@ A chat gets on the list in one of three ways:
 |---|---|
 | It is in phone mode | Nothing. `on` lists it, and each `say` is its step. `off` ends it. |
 | It posts its own steps | `vector_relay.py step --title "Atlas FA" "reading the leak data"` prints `ok chat=<id>`. Then `step --chat <id> --progress 40 "tests green"`, and `step --chat <id> --end shipped "report sent"` when it is over (`shipped`, `partial`, `dropped` or `done`). |
-| Its computer keeps session notes | `vector_relay.py board --notes <folder>` once. Every note in that folder is a row. `--machine <name>` or `--agent <name>` takes only those; `board --no-notes` stops it. |
+| Its computer keeps session notes | `vector_relay.py board --notes <folder> --this "<the name the notes give this computer>"` once. Every note in that folder is a row. `--machine <name>` or `--agent <name>` takes only those; `board --no-notes` stops it. |
 
 A session note is a Markdown file as [Cairn](https://github.com/juw12/cairn) writes them: a head
 with `title`, `status` (`live`, `shipped`, `partial`, `dropped`, `done`), `started`
 (`2026-11-21T10:01`), `machine` and `agent`, then `## Log` with lines like
 `- 10:15 note: [40%] tests green`. A folder that several computers share shows each note under
-the computer it names, once, whichever computer published it.
+the computer it names, once, whichever computer published it. With `--this`, the notes that name
+this computer are listed under the name it has on the page, with its other chats.
 
 **On the computer itself:** `vector_relay.py view` opens the page in the browser there, already
 linked to that computer and on All chats. No phone and no code are needed. The helper hands the
@@ -190,12 +191,12 @@ posted a step in the last 6 hours): then it costs the same 180 requests an hour 
 
 ## Tests
 
-    python -m unittest discover -s tests   81 tests: seal, feed, inbox, chats, pictures, the board, commands,
+    python -m unittest discover -s tests   82 tests: seal, feed, inbox, chats, pictures, the board, commands,
                                            whole trips, local mode, the 4-digit code, the list of versions
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
-                                           (as a Pixel 7 and as a wide screen), relay rules in memory: 90 steps
+                                           (as a Pixel 7 and as a wide screen), relay rules in memory: 91 steps
     python scripts/e2e.py --live           the deployed page and relay, on throwaway channels that
-                                           are wiped at the end: 87 steps. The 8 local Wi-Fi steps
+                                           are wiped at the end: 88 steps. The 8 local Wi-Fi steps
                                            are left out (they use no relay), and 5 are added: a
                                            phone with no computer yet adds its first one by code,
                                            and the channel is wiped
@@ -204,7 +205,7 @@ posted a step in the last 6 hours): then it costs the same 180 requests an hour 
 
 Not yet checked: a real iPhone (WebKit is the closest stand-in), and All chats on the page as
 deployed: 1.3.0 was written on a Mac, and the page at vector-relay.pages.dev is deployed from
-another computer. Its 22 steps pass on the deployed relay with the page from this repo; the 87
+another computer. Its 23 steps pass on the deployed relay with the page from this repo; the 88
 of `--live` are to be run after that deploy.
 
 ## Versions
@@ -214,6 +215,7 @@ the chat list); `CHANGELOG.md` and the lines below are made from it by
 `python scripts/make_changelog.py`.
 
 <!-- versions:start -->
+- **1.3.2** (2026-11-21) One computer, one name on All chats. `board --notes <folder> --this "<name>"` says which name the session notes give this computer. All chats then lists those notes under the name the computer has on the page, where it counted as one more computer before. The pictures in the README are drawn under a made-up computer name, never the real name of the computer that ran the checks.
 - **1.3.1** (2026-11-21) All chats on real notes: three fixes. A session note whose log has a line out of order no longer counts as ended tomorrow: it stood on top of Ended, marked "now". A chat that was already in phone mode when its computer moved to 1.3.0 is on All chats too. A Mac whose network name is its address shows under its computer name on the page, not as "192". The unit tests no longer fail now and then on a computer where Vector Relay is in use: a test folder that shares its guard port with the running helper is not used.
 - **1.3.0** (2026-11-21) All chats: what every chat on every computer is doing. All chats on the page: every chat of every computer it knows, the running ones first, each with its last step, how far it is and when. A row opens to its last steps, and one computer can be looked at alone. A chat says what it is doing without phone mode: `step --title "..." "..."` starts its row, `step --chat <id> "..."` adds a step, `--end shipped` ends it. A chat in phone mode is listed by itself, and what it says to the phone is its step. `board --notes <folder>` also lists the chats written down as session notes in that folder (the format Cairn writes), each under the computer its note names. `view` opens the page on the computer itself, already linked, on All chats. `board` prints the same list in the terminal. A computer that is asleep still shows what it last said. One with an older Vector Relay shows its chats in phone mode.
 - **1.2.2** (2026-11-20) Version history on the phone. The chat list on the phone has a Version history button: every version and what changed in it. One list of versions (docs/versions.json) now feeds the phone page, CHANGELOG.md and the README.
