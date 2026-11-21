@@ -550,6 +550,12 @@ body.on-board .feed, body.on-board .composer, body.on-board .preview, body.on-bo
 .row-more .times { margin: 8px 0 0; color: var(--soft); font-size: 13px; }
 .row-more .open-chat, .board .older { min-height: 40px; margin: 10px 0 0; padding: 0 14px; border: 1px solid var(--edge); border-radius: 9px; background: var(--chosen); color: var(--ink); font-size: 15px; cursor: pointer; }
 .board .older { display: block; width: 100%; margin: 4px 0 0; background: transparent; color: var(--link); }
+.row-more .remove-row { display: block; min-height: 40px; margin: 10px 0 0; padding: 0 14px; border: 1px solid var(--edge); border-radius: 9px; background: transparent; color: var(--dim); font-size: 15px; cursor: pointer; }
+.row-more .remove-row.armed { border-color: var(--orange); color: var(--orange); }
+.row-more .remove-row:disabled { opacity: .6; cursor: default; }
+.row-more .remove-row:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.row-more .remove-note { margin: 6px 0 0; color: var(--soft); font-size: 13px; }
+.row-more .remove-note.bad { color: var(--orange); }
 .board .computer { margin: 0 0 6px; color: var(--dim); font-size: 14px; overflow-wrap: anywhere; }
 .board .computer strong { color: var(--ink); font-weight: 600; }
 .board .computer.bad span { color: var(--orange); }

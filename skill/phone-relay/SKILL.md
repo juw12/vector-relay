@@ -77,6 +77,14 @@ in phone mode puts itself there with `step`:
   use that to answer "what are my chats doing" in the chat.
 - A step travels sealed like everything else, and the same rule holds: no passwords, keys,
   tokens or codes in it.
+- He takes a row off the list himself: on the page, open the row, **Remove from the list**, tap
+  again. When he asks you to do it ("remove that chat from the relay", "clean up the list"):
+  `RELAY board --ids` prints each row's id, `RELAY remove <id>` removes it, `RELAY remove` lists
+  the removed session notes and `RELAY remove --back <id>` lists one again. Remove only the rows
+  he names. A removed chat is out of phone mode (its `listen` prints `OFF`); a removed session
+  note is not touched, the board only stops listing it until its chat writes a new line.
+- If your own `listen` prints `OFF` and you did not switch phone mode off, he removed this chat
+  from the list: stop the loop and say so in the chat. Do not switch it on again by yourself.
 
 ## While you work
 
@@ -144,3 +152,9 @@ There is no time limit: a chat may stay in phone mode all day.
 `RELAY status` says in plain words what is wrong (not linked, helper not running, relay not
 reached, last contact, what each chat is doing). The helper's log is
 `%LOCALAPPDATA%\VectorRelay\serve.log`.
+
+"The relay answered 503" in `status` or the log: the relay's host cut a request the relay was
+holding (Cloudflare error 1102). From 1.3.3 the helper shortens its hold by itself and goes on;
+the log then says "holding N s from now on". A helper older than 1.3.3 stays stuck on it: bring
+this computer's `vector_relay.py` to the newest version, then `RELAY stop` (a chat in `listen`
+starts the helper again by itself).

@@ -200,6 +200,51 @@ def session_note(folder: Path, name: str, title: str, status: str, machine: str,
         f"machine: {machine}\nagent: {agent}\n---\n## Goal\n\n{title}\n\n## Log\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
 
 
+def relay_rules(playwright) -> None:
+    """The relay's own file, run in a browser on a database that only counts.
+
+    Cloudflare cuts a request that does too much work (error 1102, shown as 503). On 2026-11-21 that
+    silenced every computer: a request held for 20 seconds looked into the database about 28 times.
+    So a held request must end by itself after a few seconds and a few looks, whatever it was asked for.
+    """
+    source = (REPO / "functions" / "c" / "[[path]].js").read_text(encoding="utf-8")
+    browser = playwright.chromium.launch()
+    try:
+        page = browser.new_page()
+        page.route("https://relay.test/**", lambda route: route.fulfill(
+            content_type="text/javascript" if route.request.url.endswith(".js") else "text/html",
+            body=source if route.request.url.endswith(".js") else "<!doctype html><title>relay</title>"))
+        page.goto("https://relay.test/")
+        take, answer = page.evaluate("""async () => {
+            const relay = await import("https://relay.test/relay.js");
+            const held = async (method, path, headers) => {
+                let looks = 0;
+                const database = { prepare: (sql) => {
+                    const statement = {
+                        bind: () => statement,
+                        first: async () => { looks++; return sql.startsWith("DELETE") ? null : { mine: 1, waiting: 0 }; },
+                        all: async () => ({ results: [] }),
+                        run: async () => ({ meta: { changes: 1 } }),
+                    };
+                    return statement;
+                } };
+                const started = Date.now();
+                const reply = await relay.handle(new Request("https://relay.test/c/" + "a".repeat(20) + path, { method, headers }), { DB: database });
+                return { status: reply.status, body: await reply.text(), looks, seconds: (Date.now() - started) / 1000 };
+            };
+            return Promise.all([
+                held("POST", "/asks/take?wait=60", { "X-Relay-Write": "w".repeat(24) }),
+                held("GET", "/answer/abcdefgh12?wait=60", {}),
+            ]);
+        }""")
+        check(take["status"] == 200 and take["body"] == '{"asks":[]}' and 6 <= take["seconds"] <= 9 and take["looks"] <= 10,
+              f"relay: the helper's request is held 8 s at most and looks {take['looks']} times, whatever hold was asked for")
+        check(answer["status"] == 204 and 4 <= answer["seconds"] <= 7 and answer["looks"] <= 10,
+              f"relay: a request for an answer is held 6 s at most and looks {answer['looks']} times")
+    finally:
+        browser.close()
+
+
 def board_trip(playwright, expect, relay_address: str = "", page_address: str = "") -> None:
     """All chats: the boards of several computers on one page, on a wide screen and on a phone.
 
@@ -243,6 +288,7 @@ def board_trip(playwright, expect, relay_address: str = "", page_address: str = 
             atlas = run(mac, "on", "--label", "Atlas FA").stdout.split("chat=")[1][:4]
             run(mac, "say", "--chat", atlas, "reading the leak data")
             listener = listen(mac, atlas)
+            relay.board_step(asus, "eeee", "sent", title="Fixture drawing review", agent="vector", end="shipped")
             check("ok chat=" in run(asus, "step", "--title", "ReqPilot case studies", "--agent", "vector", "3 requirements submitted").stdout,
                   "all chats: a chat that is not in phone mode posts a step, and that starts the helper")
             # a computer whose Vector Relay is from before the board: its copy at the relay has chats and no board
@@ -335,6 +381,43 @@ def board_trip(playwright, expect, relay_address: str = "", page_address: str = 
             page.locator("#showBoard").click()
             expect(page.locator("#board .row.live")).to_have_count(5)
             check(page.locator("#showBoard").get_attribute("aria-pressed") == "true", "all chats: the chat list has All chats on top, with how many run")
+
+            # ---- Remove: a row leaves the list on every computer that lists it
+            review = page.locator("#board .row", has_text="Fixture drawing review")
+            review.locator(".row-head").click()
+            review.locator(".remove-row").click()
+            expect(review.locator(".remove-row")).to_have_text("Tap again to remove")
+            check(review.count() == 1 and "eeee" in relay.board_own(asus) and "leaves the list" in review.locator(".remove-note").inner_text(),
+                  "remove: one tap removes nothing, it asks for a second one and says what will happen")
+            review.locator(".remove-row").click()
+            expect(review).to_have_count(0, timeout=slow)
+            check("eeee" not in relay.board_own(asus) and page.locator("#board .row.live").count() == 5,
+                  "remove: a chat of another computer of the page leaves the list, there and here, and the others stay")
+            digest = page.locator("#board .row", has_text="Job digest: daily run")
+            digest.locator(".row-head").click()
+            digest.locator(".remove-row").click()
+            expect(digest.locator(".remove-note")).to_contain_text("session note stays")
+            digest.locator(".remove-row").click()
+            expect(digest).to_have_count(0, timeout=slow)
+            check(all(f"{day}-digest" in relay.removed(host) for host in (mac, asus)) and (notes / f"{day}-digest.md").exists(),
+                  "remove: a session note two computers list is taken off by both, and the note itself is not touched")
+            door, deadline, kept = relay.Relay(relay.settings(mac)), time.time() + 40, None
+            while time.time() < deadline:
+                code, body = door.call("GET", "/state")
+                kept = relay.unseal(door.key, body.decode("utf-8")) if code == 200 else None
+                if kept and not any(row["id"] == f"{day}-digest" for row in kept["board"]):
+                    break
+                time.sleep(0.5)
+            door.close()
+            check(bool(kept) and not any(row["id"] == f"{day}-digest" for row in kept["board"]) and time.time() < deadline,
+                  "remove: the copy the relay keeps drops the row within seconds, so it does not come back on the next look")
+            legacy = page.locator("#board .row", has_text="Legacy chat")
+            legacy.locator(".row-head").click()
+            legacy.locator(".remove-row").click()
+            legacy.locator(".remove-row").click()
+            expect(legacy.locator(".remove-note.bad")).to_contain_text("Old PC did not answer", timeout=slow)
+            check(legacy.count() == 1 and legacy.locator(".remove-row").inner_text() == "Remove from the list",
+                  "remove: a computer that does not answer keeps its row, and the page says which computer and why")
             context.close()
             browser.close()
 
@@ -381,6 +464,20 @@ def board_trip(playwright, expect, relay_address: str = "", page_address: str = 
             page.locator("#chats .chip").first.tap()
             expect(page.locator("#composer")).to_be_visible()
             check(page.locator("#board").is_hidden(), "all chats: a tap on a chat in the list goes back to that chat")
+            page.locator("#menu").tap()
+            page.locator("#showBoard").tap()
+            atlas_row = page.locator("#board .row", has_text="Atlas FA")
+            atlas_row.locator(".row-head").tap()
+            atlas_row.locator(".remove-row").tap()
+            expect(atlas_row.locator(".remove-note")).to_contain_text("leaves phone mode")
+            atlas_row.locator(".remove-row").tap()
+            expect(atlas_row).to_have_count(0, timeout=slow)
+            try:
+                ended = listener.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                ended = None
+            check(ended == 3 and atlas not in relay.chats(mac) and atlas not in relay.board_own(mac),
+                  "remove: on a phone, a chat in phone mode leaves the list and phone mode, and its `listen` ends with OFF")
             check(not errors, "all chats: no errors on the page" + (": " + "; ".join(errors[:3]) if errors else ""))
         finally:
             if browser is not None:
@@ -859,6 +956,7 @@ def main() -> int:
             check(not errors, "no errors on the page" + (": " + "; ".join(errors[:3]) if errors else ""))
             if not chosen.relay:
                 local_trip(playwright, expect)
+                relay_rules(playwright)
             device_trip(playwright, expect, chosen.relay, chosen.page)
             board_trip(playwright, expect, chosen.relay, chosen.page)
     finally:

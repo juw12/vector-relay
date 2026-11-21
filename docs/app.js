@@ -15,10 +15,13 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.3.2";  // the newest entry in versions.json; a test keeps the two in step
+  var APP_VERSION = "1.3.3";  // the newest entry in versions.json; a test keeps the two in step
   var KEY = "vrelay.link", PENDING = "vrelay.pending", HINT = "vrelay.hint", CHAT = "vrelay.chat";
   var HANG_MS = 10000;          // a request with no reply for this long is dropped
-  var ANSWER_HOLD_S = 8;        // the relay holds the request for the answer this long
+  var ANSWER_HOLD_S = 4;        // the relay holds the request for the answer this long (a long hold gets cut by its host)
+  var CUT_PAUSE_MS = 600;       // after the relay's host cut a held request (503), look again this soon
+  var REMOVE_WAIT_MS = 9000;    // how long a computer gets to say it removed a row
+  var REMOVE_ARMED_MS = 5000;   // "Tap again to remove" waits this long for the second tap
   var ANSWER_HANG_MS = 15000;
   var FEED_WAIT_MS = 9000;      // how long the PC gets to answer
   var PROMPT_WAIT_MS = 20000;   // longer than the PC accepts a prompt for (15 s)
@@ -198,6 +201,7 @@
       var asked = Date.now();
       reply = await reach(base + "/answer/" + id + "?wait=" + ANSWER_HOLD_S, { cache: "no-store" }, ANSWER_HANG_MS);
       if (reply.status === 200) return unseal(await reply.text());
+      if (reply.status === 503) { await pause(CUT_PAUSE_MS); continue; }   // the relay's host cut the held request: the answer is still there
       if (reply.status !== 204) throw trouble("refused", reply.status);
       if (Date.now() - asked < 1000) {   // this relay did not hold the request: look again in a moment
         await pause(wait);
@@ -227,6 +231,8 @@
   var openRow = "";         // the row of the board that shows all its steps
   var olderRows = false, onlyWhere = "", boardAsking = false, boardTimer = 0, boardShown = "";
   var resting = {};         // computer -> when it may be asked live again
+  var clocks = {};          // computer -> its clock minus this page's, in ms, as its last live answer showed
+  var removing = {};        // row -> {state: "armed" | "sending" | "failed", why}: Remove was tapped on it
   try { pending = JSON.parse(store.getItem(PENDING) || "[]").filter(function (p) { return p && p.pid && p.text; }); } catch (error) { pending = []; }
   pending.forEach(function (p) {
     if (p.state === "sending") { p.state = "failed"; p.why = "Not sent."; }
@@ -638,26 +644,68 @@
     return toBase64(all);
   }
 
-  /* The board of a computer whose feed this page does not show, asked from the computer itself.
-     null when it does not answer (asleep, or a Vector Relay from before the board). */
-  async function askBoard(device) {
+  /* One sealed question to any computer of this page, with that computer's own key.
+     Its answer, or null when it does not answer in time (asleep, or the relay is not reached). */
+  async function askDevice(device, question, waitMs) {
     var at = device.link.u + "/c/" + device.link.c, id = randomId();
     try {
-      var body = await sealWith(device.link, { route: "board", t: Date.now() });
-      var reply = await reach(at + "/ask/" + id, { method: "POST", headers: { "Content-Type": "text/plain" }, body: body }, HANG_MS);
+      var stamped = Object.assign({ t: Date.now() + (clocks[idOf(device.link)] || 0) }, question);
+      var reply = await reach(at + "/ask/" + id, { method: "POST", headers: { "Content-Type": "text/plain" }, body: await sealWith(device.link, stamped) }, HANG_MS);
+      if (!reply.ok) return null;
       var started = Date.now();
-      while (reply.ok && Date.now() - started < BOARD_WAIT_MS) {
+      while (Date.now() - started < waitMs) {
         var asked = Date.now();
-        reply = await reach(at + "/answer/" + id + "?wait=" + Math.ceil(BOARD_WAIT_MS / 1000), { cache: "no-store" }, ANSWER_HANG_MS);
-        if (reply.status === 200) {
-          var answer = await openWith(device.link, await reply.text());
-          return answer && answer.ok ? answer : null;
-        }
+        reply = await reach(at + "/answer/" + id + "?wait=" + ANSWER_HOLD_S, { cache: "no-store" }, ANSWER_HANG_MS);
+        if (reply.status === 200) return await openWith(device.link, await reply.text());
+        if (reply.status === 503) { await pause(CUT_PAUSE_MS); continue; }   // cut by the relay's host: look again
         if (reply.status !== 204) return null;
         if (Date.now() - asked < 1000) await pause(400);   // this relay did not hold the request
       }
     } catch (error) { /* said by the copy the relay keeps */ }
     return null;
+  }
+
+  /* The board of a computer whose feed this page does not show, asked from the computer itself.
+     null when it does not answer (asleep, or a Vector Relay from before the board). */
+  async function askBoard(device) {
+    var answer = await askDevice(device, { route: "board" }, BOARD_WAIT_MS);
+    if (!answer || !answer.ok) return null;
+    if (answer.pc) clocks[idOf(device.link)] = answer.pc * 1000 - Date.now();
+    return answer;
+  }
+
+  /* Remove on a row: every computer that lists the row takes it off its board. A chat leaves phone
+     mode with it; a session note is not touched, its computer only stops listing it. */
+  var REMOVE_WHY = {
+    route: "runs an older Vector Relay that cannot remove a row. Update it there.",
+    old: "took it too late. Try again.",
+    bad: "refused it.",
+    key: "has another key than this page. Add it again."
+  };
+  function listers(item) {
+    if (item.row.src !== "note") return [item.device];
+    return devices.filter(function (device) {
+      var board = boards[idOf(device.link)];
+      return board && Array.isArray(board.rows) && board.rows.some(function (row) { return row && row.src === "note" && row.id === item.row.id; });
+    });
+  }
+  async function removeRow(item) {
+    removing[item.key] = { state: "sending" };
+    boardShown = "";
+    renderBoard();
+    var failed = [];
+    await Promise.all(listers(item).map(async function (device) {
+      var id = idOf(device.link), answer = await askDevice(device, { route: "remove", row: item.row.id }, REMOVE_WAIT_MS);
+      if (answer && answer.ok) {
+        if (answer.pc) clocks[id] = answer.pc * 1000 - Date.now();
+        keepBoard(id, answer);
+        if (active && idOf(active.link) === id && Array.isArray(answer.chats)) { info.chats = answer.chats; choose(); }
+      } else failed.push(device.name + " " + (answer ? REMOVE_WHY[answer.error] || "refused it." : "did not answer. Is it on and awake?"));
+    }));
+    if (failed.length) removing[item.key] = { state: "failed", why: failed.join(" ") };
+    else { delete removing[item.key]; if (openRow === item.key) openRow = ""; }
+    boardShown = shown = listed = "";
+    render();
   }
 
   async function lookBoards() {
@@ -780,6 +828,24 @@
       go.onclick = function () { openChat(item); };
       more.appendChild(go);
     }
+    var mark = removing[item.key] || {}, drop = element("button", "remove-row" + (mark.state === "armed" ? " armed" : ""),
+      mark.state === "armed" ? "Tap again to remove" : mark.state === "sending" ? "Removing…" : "Remove from the list");
+    drop.type = "button";
+    drop.disabled = mark.state === "sending";
+    drop.onclick = function () {
+      if (mark.state === "armed") { removeRow(item); return; }
+      removing[item.key] = { state: "armed" };   // one tap is easy to make by mistake: the second one removes
+      setTimeout(function () {
+        if (removing[item.key] && removing[item.key].state === "armed") { delete removing[item.key]; boardShown = ""; if (view === "board") renderBoard(); }
+      }, REMOVE_ARMED_MS);
+      boardShown = "";
+      renderBoard();
+    };
+    more.appendChild(drop);
+    if (mark.state === "armed") more.appendChild(element("p", "remove-note",
+      item.phone ? "The chat leaves phone mode and the list. The chat itself goes on in its app." :
+      row.src === "note" ? "The row leaves the list. Its session note stays where it is." : "The row leaves the list."));
+    if (mark.state === "failed") more.appendChild(element("p", "remove-note bad", "Not removed: " + mark.why));
     made.appendChild(more);
     return made;
   }
@@ -800,7 +866,7 @@
     $("status").textContent = words;
     $("title").textContent = "All chats";
     document.title = "All chats";
-    var mark = JSON.stringify([openRow, olderRows, onlyWhere, devices.map(function (device) {
+    var mark = JSON.stringify([openRow, olderRows, onlyWhere, removing, devices.map(function (device) {
       var board = boards[idOf(device.link)];
       return [device.name, board ? [board.why, board.pc ? since(board.pc) : "", board.rows === null] : null];
     }), items.map(function (item) { return [item.key, item.where, item.row.updated, item.row.state, item.row.progress, since(item.row.updated), stateWords(item), (item.row.steps || []).length]; })]);
@@ -1089,6 +1155,7 @@
         var plain = await subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, opener, raw.slice(12));
         return JSON.parse(new TextDecoder().decode(plain)).link;
       }
+      if (reply.status === 503) { await pause(CUT_PAUSE_MS); continue; }   // cut by the relay's host: look again
       if (reply.status !== 204) throw trouble("silent");
       if (Date.now() - asked < 1000) await pause(400);   // this relay did not hold the request
     }

@@ -50,14 +50,18 @@ class Phone:
         except urllib.error.HTTPError as error:
             return error.code, ""
 
-    def ask(self, route: str, wait: float = 12, **more) -> dict:
+    def ask(self, route: str, wait: float = 12, hold: int = 5, **more) -> dict:
         ask_id = secrets.token_urlsafe(12)
         sealed = relay.seal(self.key, {"route": route, "t": int(time.time() * 1000), **more})
         status, _ = self.http("POST", "/ask/" + ask_id, sealed)
+        claimed = time.time() + 5
+        while status == 404 and time.time() < claimed:  # a helper that started this moment has not claimed its channel yet
+            time.sleep(0.1)
+            status, _ = self.http("POST", "/ask/" + ask_id, sealed)
         assert status == 200, status
         deadline = time.time() + wait
         while time.time() < deadline:
-            status, body = self.http("GET", "/answer/" + ask_id + "?wait=5")
+            status, body = self.http("GET", "/answer/" + ask_id + f"?wait={hold}")
             if status == 200:
                 return relay.unseal(self.key, body)
         raise TimeoutError("the PC did not answer")
@@ -510,6 +514,75 @@ Titip 0.10.0
         self.assertEqual(relay.note_rows(notes)[0]["progress"], 90)
 
 
+    def sealed_remove(self, row, age_s: float = 0) -> str:
+        return relay.seal(self.key, {"route": "remove", "row": row, "t": int((time.time() - age_s) * 1000)})
+
+    def test_a_removed_chat_leaves_the_board_and_the_chat_list(self) -> None:
+        stays = run(self.folder, "step", "--title", "Stays", "working").stdout.split("chat=")[1][:4]
+        goes = run(self.folder, "step", "--title", "Goes", "stuck").stdout.split("chat=")[1][:4]
+        self.chat_on(goes, "Goes")
+        self.assertIn(f"id={goes}", run(self.folder, "board", "--ids").stdout)
+        self.assertNotIn("id=", run(self.folder, "board").stdout)
+        said = run(self.folder, "remove", goes)
+        self.assertEqual(said.returncode, 0, said.stdout)
+        self.assertIn("out of phone mode", said.stdout)
+        self.assertEqual([row["id"] for row in relay.board_rows(self.folder)], [stays])
+        self.assertEqual(relay.chats(self.folder), {})
+        self.assertEqual(run(self.folder, "step", "--chat", goes, "still here?").returncode, 2)  # it is told so, and starts again with `on`
+        again = run(self.folder, "remove", goes, "zzzz")
+        self.assertEqual(again.returncode, 2)
+        self.assertIn("No row zzzz", again.stdout)
+
+    def test_a_removed_note_stays_away_until_its_chat_writes_again_and_the_note_is_not_touched(self) -> None:
+        notes = self.folder / "notes"
+        notes.mkdir()
+        started = time.time() - 3 * 3600
+
+        def write(name: str, *lines: tuple[float, str]) -> Path:
+            head = f"---\ntitle: {name}\ntype: session\nstatus: live\nstarted: {time.strftime('%Y-%m-%dT%H:%M', time.localtime(started))}\n"
+            log = "".join(f"- {time.strftime('%H:%M', time.localtime(when))} note: {words}\n" for when, words in lines)
+            path = notes / f"{name}.md"
+            path.write_text(head + "machine: MacBook Pro 15,4\nagent: vector\n---\n## Log\n\n" + log, encoding="utf-8")
+            return path
+
+        path = write("titip", (started + 60, "first step"))
+        other = write("other", (started + 60, "first step"))
+        before = path.read_bytes()
+        run(self.folder, "board", "--notes", str(notes))
+        self.assertEqual(sorted(row["id"] for row in relay.board_rows(self.folder)), ["other", "titip"])
+        self.assertEqual(relay.remove_row(self.folder, "titip"), "note")
+        self.assertEqual([row["id"] for row in relay.board_rows(self.folder)], ["other"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(other.exists())
+        self.assertIn("titip", run(self.folder, "remove").stdout)
+        self.assertEqual(relay.remove_row(self.folder, "no-such-note"), "")
+
+        relay.write_json(self.folder / "removed.json", {"titip": int(time.time()) - 7200})  # removed two hours ago ...
+        write("titip", (started + 60, "first step"), (time.time() - 600, "he asked for one more thing"))  # ... and a line ten minutes ago
+        relay._notes["at"] = 0
+        self.assertEqual(sorted(row["id"] for row in relay.board_rows(self.folder)), ["other", "titip"])
+
+        self.assertEqual(relay.remove_row(self.folder, "other"), "note")
+        self.assertEqual([row["id"] for row in relay.board_rows(self.folder)], ["titip"])
+        self.assertIn("listed again", run(self.folder, "remove", "--back", "other").stdout)
+        self.assertEqual(run(self.folder, "remove", "--back", "other").returncode, 2)
+        self.assertEqual(sorted(row["id"] for row in relay.board_rows(self.folder)), ["other", "titip"])
+
+    def test_the_page_removes_a_row_now_and_a_recording_removes_nothing(self) -> None:
+        chat = run(self.folder, "step", "--title", "Stuck since noon", "waiting").stdout.split("chat=")[1][:4]
+        late = relay.answer_ask(self.folder, self.key, [], self.sealed_remove(chat, age_s=relay.REMOVE_MAX_AGE_S + 5))
+        self.assertEqual((late["ok"], late["error"]), (False, "old"))
+        for odd in ("", "x" * 121, 7, None):
+            self.assertEqual(relay.answer_ask(self.folder, self.key, [], self.sealed_remove(odd))["error"], "bad")
+        self.assertEqual(relay.answer_ask(self.folder, os.urandom(32), [], self.sealed_remove(chat))["error"], "key")
+        self.assertEqual(len(relay.board_rows(self.folder)), 1)
+        done = relay.answer_ask(self.folder, self.key, [], self.sealed_remove(chat))
+        self.assertEqual((done["ok"], done["removed"], done["board"], done["chats"]), (True, "chat", [], []))
+        self.assertTrue((self.folder / "publish").exists())  # the helper sends the relay a new copy without the usual wait
+        twice = relay.answer_ask(self.folder, self.key, [], self.sealed_remove(chat))
+        self.assertEqual((twice["ok"], twice["removed"]), (True, ""))  # a second computer's page asking the same is no error
+
+
 class BoardTripTests(Case):
     """The board on its way to the page, and what phone mode writes on it."""
 
@@ -570,6 +643,20 @@ class BoardTripTests(Case):
         self.assertTrue(relay.board_wanted(self.folder))
         run(self.folder, "step", "--chat", chat, "--end", "dropped")
         self.assertFalse(relay.board_wanted(self.folder))
+
+    def test_a_removed_row_leaves_the_copy_the_relay_keeps_within_seconds(self) -> None:
+        goes = "gggg"
+        relay.board_step(self.folder, goes, "stuck", title="Goes")  # before the helper starts: its first copy holds both rows
+        stays = run(self.folder, "step", "--title", "Stays", "working").stdout.split("chat=")[1][:4]
+        self.assertEqual(sorted(row["id"] for row in self.kept()["board"]), sorted([stays, goes]))
+        time.sleep(relay.PUBLISH_NOW_GAP_S)
+        answer = self.phone.ask("remove", row=goes)
+        self.assertEqual((answer["removed"], [row["id"] for row in answer["board"]]), ("chat", [stays]))
+        deadline = time.time() + 20  # far sooner than the two minutes between ordinary copies
+        while time.time() < deadline and len(self.kept()["board"]) > 1:
+            time.sleep(0.3)
+        self.assertEqual([row["id"] for row in self.kept()["board"]], [stays])
+        self.assertFalse((self.folder / "publish").exists())
 
     def test_the_helper_hands_the_page_to_this_pc_and_nothing_else(self) -> None:
         run(self.folder, "on")
@@ -754,6 +841,33 @@ class TripTests(Case):
         calls = self.fake.calls
         time.sleep(4)
         self.assertLessEqual(self.fake.calls - calls, 2)  # and it does not ask over and over while nothing happens
+
+    def test_a_helper_whose_held_request_is_cut_holds_shorter_and_answers(self) -> None:
+        self.fake.cut_over = 3  # Cloudflare on 2026-11-21: a long hold is cut with 503 (error 1102)
+        run(self.folder, "on")
+        started = time.time()
+        self.assertTrue(self.phone.ask("feed", after=0, hold=2)["ok"])
+        self.assertLess(time.time() - started, 5)  # it asked again at once with a shorter hold, twice
+        self.assertEqual(self.fake.take_waits[:3], [relay.TAKE_HOLD_S, relay.TAKE_HOLD_S // 2, relay.TAKE_HOLD_S // 4])
+        self.assertEqual(self.fake.cuts, 2)
+        time.sleep(3)
+        self.assertEqual(self.fake.cuts, 2)  # and stays with the hold that works
+        self.assertIn("holding 2 s", (self.folder / "serve.log").read_text(encoding="utf-8"))
+        self.assertTrue(self.phone.ask("feed", after=0, hold=2)["ok"])
+        self.assertEqual(relay.shorter_hold(relay.TAKE_HOLD_LEAST_S), relay.TAKE_HOLD_LEAST_S)
+
+    def test_listen_ends_when_its_chat_is_removed_from_the_page(self) -> None:
+        chat = run(self.folder, "on", "--label", "Atlas FA").stdout.split("chat=")[1][:4]
+        listener = subprocess.Popen(
+            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--chat", chat], stdout=subprocess.PIPE, encoding="utf-8",
+            env={**os.environ, "VECTOR_RELAY_HOME": str(self.folder)},
+        )
+        time.sleep(1)
+        answer = self.phone.ask("remove", row=chat)
+        self.assertEqual((answer["ok"], answer["removed"], answer["chats"], answer["board"]), (True, "chat", [], []))
+        heard, _ = listener.communicate(timeout=15)
+        self.assertEqual(heard.split(), ["LISTENING", "OFF"])
+        self.assertEqual(self.phone.ask("feed", after=0)["chats"], [])
 
     def test_the_relay_keeps_a_sealed_copy_for_a_pc_that_is_off(self) -> None:
         run(self.folder, "on")

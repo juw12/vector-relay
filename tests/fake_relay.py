@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MAX_STATE, MAX_ASK, MAX_ASKS, MAX_ANSWER = 300_000, 1_200_000, 30, 1_600_000
 CHANNEL = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 ASK_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
-TAKE_HOLD_S, ANSWER_HOLD_S, LOOK_S = 20, 10, 0.05
+TAKE_HOLD_S, ANSWER_HOLD_S, LOOK_S = 8, 6, 0.05
 
 
 class FakeRelay(ThreadingHTTPServer):
@@ -32,6 +32,9 @@ class FakeRelay(ThreadingHTTPServer):
         self.answers: dict[str, dict[str, str]] = {}
         self.calls = 0
         self.closing = False
+        self.cut_over: float | None = None  # as Cloudflare on a bad day: a request held longer than this many seconds is cut (503, error 1102)
+        self.cuts = 0
+        self.take_waits: list[float] = []  # the hold each asks/take asked for
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
 
@@ -80,13 +83,23 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return known == digest
 
-    def held(self, most: float) -> float:
-        """The moment until which this request may be held: what ?wait= asks for, up to `most` seconds."""
+    def wanted(self, most: float) -> float:
+        """How many seconds this request may be held: what ?wait= asks for, up to `most`."""
         asked = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("wait", ["0"])[0]
         try:
-            return time.time() + min(most, max(0.0, float(asked)))
+            return min(most, max(0.0, float(asked)))
         except ValueError:
-            return time.time()
+            return 0.0
+
+    def cut(self, seconds: float) -> bool:
+        """True when the host would cut a request held this long; the caller answers 503 as Cloudflare does."""
+        relay = self.server
+        if relay.cut_over is None or seconds <= relay.cut_over:
+            return False
+        relay.cuts += 1
+        time.sleep(LOOK_S)
+        self.reply(503, "error code: 1102\n")
+        return True
 
     def handle_one(self, method: str) -> None:
         relay = self.server
@@ -98,12 +111,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, "Not found.")
         channel, what = parts[1], "/".join(parts[2:])
         if what == "asks/take" and method == "POST":
-            until = self.held(TAKE_HOLD_S)
+            seconds = self.wanted(TAKE_HOLD_S)
+            relay.take_waits.append(seconds)
+            if self.cut(seconds):
+                return
+            until = time.time() + seconds
             # as on Cloudflare: a channel that is not there (any more) is answered at once
             while time.time() < until and not relay.asks.get(channel) and channel in relay.owners and not relay.closing:
                 time.sleep(LOOK_S)
         if len(parts) == 4 and parts[2] == "answer" and method == "GET":
-            until = self.held(ANSWER_HOLD_S)
+            seconds = self.wanted(ANSWER_HOLD_S)
+            if self.cut(seconds):
+                return
+            until = time.time() + seconds
             while time.time() < until and parts[3] not in relay.answers.get(channel, {}) and not relay.closing:
                 time.sleep(LOOK_S)
         with relay.lock:
