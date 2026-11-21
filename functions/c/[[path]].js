@@ -6,9 +6,9 @@
      PUT    /c/<channel>/state        PC, X-Relay-Write: keep a sealed copy of the feed (the first write claims the channel)
      GET    /c/<channel>/state        phone: read that copy (shown when the PC does not answer)
      POST   /c/<channel>/ask/<id>     phone: leave a sealed question (at most 30 waiting)
-     POST   /c/<channel>/asks/take    PC, X-Relay-Write: read the questions and clear them (?wait=20 holds the request until one comes)
+     POST   /c/<channel>/asks/take    PC, X-Relay-Write: read the questions and clear them (?wait=8 holds the request until one comes)
      PUT    /c/<channel>/answer/<id>  PC, X-Relay-Write: leave the sealed answer
-     GET    /c/<channel>/answer/<id>  phone: read the answer once (204 while there is none; ?wait=8 holds the request until it comes)
+     GET    /c/<channel>/answer/<id>  phone: read the answer once (204 while there is none; ?wait=6 holds the request until it comes)
      DELETE /c/<channel>              PC, X-Relay-Write: forget this channel
 
    Runs as a Cloudflare Pages Function next to the phone page, so the phone talks to one address.
@@ -21,8 +21,13 @@ const MAX_ASKS = 30;
 const MAX_ANSWER = 1600000;
 const LIVE_MS = 5 * 60 * 1000;
 const KEEP_MS = 30 * 24 * 3600 * 1000;
-const TAKE_HOLD_S = 20, TAKE_LOOK_MS = 700;      // a held request looks into the database this often:
-const ANSWER_HOLD_S = 10, ANSWER_LOOK_MS = 400;  // under the 50 queries one free request may make
+/* A held request looks into the database again and again, and every look costs processor time.
+   Cloudflare's free plan gives one request about 10 ms of it: on 2026-11-21 requests held for 20 s
+   (about 28 looks) were cut with error 1102 (HTTP 503) two times in three, and no computer answered
+   its phone. So a request is held for a few seconds only and makes at most MAX_LOOKS looks. */
+const MAX_LOOKS = 10;
+const TAKE_HOLD_S = 8, TAKE_LOOK_MS = 1000;
+const ANSWER_HOLD_S = 6, ANSWER_LOOK_MS = 300, ANSWER_LOOK_MOST_MS = 1000;  // an answer mostly comes in the first second: look often first
 const CHANNEL = /^[A-Za-z0-9_-]{16,64}$/;
 const ASK_ID = /^[A-Za-z0-9_-]{8,40}$/;
 const CORS = {
@@ -117,14 +122,14 @@ export async function handle(request, env) {
   if (what === "asks/take" && method === "POST") {
     const owner = await ownerHash(request);
     const until = now + holdMs(url, TAKE_HOLD_S);
-    for (;;) {
+    for (let looks = 1; ; looks++) {
       const row = await db.prepare(
         "SELECT (SELECT 1 FROM channels WHERE name = ?1 AND owner = ?2) AS mine, " +
         "(SELECT COUNT(*) FROM asks WHERE channel = ?1) AS waiting"
       ).bind(channel, owner).first();
       if (!row.mine) return reply(404, "Nothing here.");
       if (row.waiting) break;
-      if (Date.now() + TAKE_LOOK_MS > until) return reply(200, JSON.stringify({ asks: [] }), "application/json");
+      if (looks >= MAX_LOOKS || Date.now() + TAKE_LOOK_MS > until) return reply(200, JSON.stringify({ asks: [] }), "application/json");
       await pause(TAKE_LOOK_MS);
     }
     const taken = await db.prepare("DELETE FROM asks WHERE channel = ?1 RETURNING id, body, t").bind(channel).all();
@@ -135,11 +140,13 @@ export async function handle(request, env) {
   if (parts[2] === "answer" && parts.length === 4 && ASK_ID.test(id)) {
     if (method === "GET") {
       const until = now + holdMs(url, ANSWER_HOLD_S);
-      for (;;) {
+      let gap = ANSWER_LOOK_MS;
+      for (let looks = 1; ; looks++) {
         const row = await db.prepare("DELETE FROM answers WHERE channel = ?1 AND id = ?2 RETURNING body").bind(channel, id).first();
         if (row !== null) return reply(200, row.body);
-        if (Date.now() + ANSWER_LOOK_MS > until) return reply(204, null);
-        await pause(ANSWER_LOOK_MS);
+        if (looks >= MAX_LOOKS || Date.now() + gap > until) return reply(204, null);
+        await pause(gap);
+        gap = Math.min(ANSWER_LOOK_MOST_MS, Math.round(gap * 1.4));
       }
     }
     if (method === "PUT") {

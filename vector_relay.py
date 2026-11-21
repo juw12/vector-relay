@@ -64,7 +64,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -106,15 +106,20 @@ BOARD_TITLE, BOARD_STEP = 140, 240  # characters
 BOARD_BYTES = 40_000  # the whole board, inside the copy the relay keeps
 BOARD_KEPT_S = 7 * 24 * 3600  # a chat that ended stays on the board this long
 BOARD_QUIET_S = 6 * 3600  # a running chat with no step for this long has probably stopped
+REMOVE_MAX_AGE_S = 120  # the page's word to remove a row is taken this long after it was written
+REMOVED_KEPT_S = BOARD_KEPT_S + 3 * 86400  # a removed note is remembered until the board would have dropped it anyway
 NOTES_EVERY_S = 15  # how often the folder of session notes is looked at
 RELAY_STATE_CHARS = 290_000  # the relay takes a sealed copy of 300,000 characters
 
 PUBLISH_GAP_S = 120  # the relay's free plan allows 1,000 stored writes a day
+PUBLISH_NOW_GAP_S = 5  # ... but a row that was removed by hand leaves the relay's copy this soon
 HEARTBEAT_S = 30 * 60
 ASK_BUSY_S, ASK_BUSY_FOR_S = 0.7, 120  # how often the helper looks for a question while the phone is in use
 ASK_RECENT_S, ASK_RECENT_FOR_S = 2.0, 30 * 60
 ASK_IDLE_S = 5.0
-TAKE_HOLD_S = 20  # the relay holds the helper's request this long, and answers the moment a question comes
+TAKE_HOLD_S = 8  # the relay holds the helper's request this long, and answers the moment a question comes
+TAKE_HOLD_LEAST_S = 2  # ... and never shorter than this: a relay whose host cuts held requests gets shorter ones
+HOLD_LONGER_AFTER_S = 10 * 60  # a hold that was made shorter grows back a second after this long without a cut
 ASK_RETRY_S = 15
 LISTEN_BEAT_S, LISTEN_FRESH_S = 5, 15
 IDLE_ON_S = 6 * 3600  # the helper stops this long after the chat last said or heard anything
@@ -586,7 +591,9 @@ def board_rows(folder: Path, most: int = BOARD_ROWS, bytes_max: int = BOARD_BYTE
         for chat, entry in phone.items() if entry["on"] and chat not in listed
     ]
     if found.get("notes"):
-        rows += note_rows(Path(str(found["notes"])), str(found.get("notesMachine", "")), str(found.get("notesAgent", "")))
+        gone = removed(folder)  # a note that was removed stays away until its chat writes a new line
+        rows += [row for row in note_rows(Path(str(found["notes"])), str(found.get("notesMachine", "")), str(found.get("notesAgent", "")))
+                 if row["updated"] > gone.get(row["id"], 0)]
     shown = []
     for row in rows:
         waits = phone.get(row.get("chat", ""), {}).get("on", False)  # a chat in phone mode may wait all day
@@ -611,6 +618,56 @@ def board_wanted(folder: Path) -> bool:
         return True
     now = time.time()
     return any(row["state"] == "live" and now - row["updated"] < IDLE_ON_S for row in board_own(folder).values())
+
+
+def removed(folder: Path) -> dict[str, int]:
+    """The session notes taken off the board by hand: note name -> when."""
+    found, now = read_json(folder / "removed.json", {}), time.time()
+    if not isinstance(found, dict):
+        return {}
+    return {str(name): int(when) for name, when in found.items()
+            if isinstance(when, (int, float)) and now - when < REMOVED_KEPT_S}
+
+
+def remove_row(folder: Path, row: str) -> str:
+    """Takes one row off the board and out of the chat list. Says what it was: "chat", "note", or "" for no such row.
+
+    A chat leaves phone mode with it (its `listen` ends with OFF) and is back with its next `on`.
+    A session note is not touched: the board only stops listing it, until its chat writes a new line.
+    """
+    row, now, what = str(row), int(time.time()), ""
+    with locked(folder):
+        phone, own = chats(folder), board_own(folder)
+        if row in phone or row in own:
+            what = "chat"
+            if phone.pop(row, None) is not None:
+                write_json(folder / "chats.json", phone)
+            if own.pop(row, None) is not None:
+                write_json(folder / "board.json", own)
+        else:
+            found = settings(folder)
+            listed = note_rows(Path(str(found["notes"])), str(found.get("notesMachine", "")),
+                               str(found.get("notesAgent", ""))) if found.get("notes") else []
+            gone = removed(folder)
+            if any(note["id"] == row for note in listed) or row in gone:
+                what = "note"
+                write_json(folder / "removed.json", {**gone, row: now})
+    if what:
+        (folder / "publish").write_text(str(now), encoding="ascii")  # the relay's copy must not show it for minutes more
+        touch(folder)
+    return what
+
+
+def restore_row(folder: Path, row: str) -> bool:
+    """Lists a removed session note again. (A removed chat is back with its next `on`.)"""
+    with locked(folder):
+        gone = removed(folder)
+        if gone.pop(str(row), None) is None:
+            return False
+        write_json(folder / "removed.json", gone)
+    (folder / "publish").write_text(str(int(time.time())), encoding="ascii")
+    touch(folder)
+    return True
 
 
 def fit_copy(folder: Path, key: bytes) -> tuple[dict, str]:
@@ -705,6 +762,19 @@ def answer_ask(folder: Path, key: bytes, seen: list[str], body: str, clock=time.
     if route == "board":  # All chats asks every computer, also the ones whose feed the page does not show
         return {"ok": True, "v": VERSION, "pc": int(time.time()), "chats": chat_list(folder), "board": board_rows(folder),
                 "machine": str(settings(folder).get("notesThis", ""))[:40]}
+    if route == "remove":  # All chats, Remove on a row: the page asks every computer that lists it
+        try:
+            age = abs(clock() - float(ask.get("t", 0)) / 1000)
+        except (TypeError, ValueError):
+            age = REMOVE_MAX_AGE_S + 1
+        name = ask.get("row")
+        if not isinstance(name, str) or not 0 < len(name) <= 120:
+            return {"ok": False, "error": "bad"}
+        if age > REMOVE_MAX_AGE_S:  # a recording: removing is asked for now or not at all
+            return {"ok": False, "error": "old"}
+        what = remove_row(folder, name)
+        return {"ok": True, "v": VERSION, "pc": int(time.time()), "removed": what, "chats": chat_list(folder),
+                "board": board_rows(folder), "machine": str(settings(folder).get("notesThis", ""))[:40]}
     if route == "event":
         for event in read_feed(folder):
             if event["n"] == ask.get("n"):
@@ -958,6 +1028,11 @@ def serve_page(folder: Path) -> ThreadingHTTPServer | None:
     return server
 
 
+def shorter_hold(hold: int) -> int:
+    """The hold to ask for after the relay's host cut a request it was holding: half, but never under the least."""
+    return max(TAKE_HOLD_LEAST_S, hold // 2)
+
+
 def serve(folder: Path) -> int:
     """Passes questions and answers between the relay and this folder until nobody needs it."""
     guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -994,6 +1069,7 @@ def serve(folder: Path) -> int:
     stop.unlink(missing_ok=True)
     status = {"pid": os.getpid(), "started": int(time.time()), "contact": 0, "error": ""}
     published_at, published, last_ask, said = 0.0, None, 0.0, ""
+    hold, hold_since = TAKE_HOLD_S, time.time()  # how long the relay is asked to hold a request, and since when
     log(folder, f"helper {VERSION} started, pid {os.getpid()}")
 
     held_now = threading.Event()  # set while the helper sits in the request the relay holds
@@ -1029,7 +1105,8 @@ def serve(folder: Path) -> int:
                 state = feed_answer(folder, limit=STATE_EVENTS, text_max=STATE_TEXT, bytes_max=STATE_BYTES)
                 shown = (state["last"], json.dumps(state["chats"], sort_keys=True), len(state["waiting"]),
                          json.dumps(state["board"], sort_keys=True))
-                due = shown != published and now - published_at >= PUBLISH_GAP_S
+                urgent = (folder / "publish").exists()  # a row was removed by hand
+                due = shown != published and now - published_at >= (PUBLISH_NOW_GAP_S if urgent else PUBLISH_GAP_S)
                 if published is None or due or now - published_at >= HEARTBEAT_S:
                     code, _ = relay.call("PUT", "/state", fit_copy(folder, relay.key)[1], owner=True)
                     if code == 403:
@@ -1039,10 +1116,12 @@ def serve(folder: Path) -> int:
                     if code != 200:
                         raise OSError(f"the relay answered {code} to the state")
                     published_at, published = now, shown
+                if urgent and shown == published:
+                    (folder / "publish").unlink(missing_ok=True)
                 asked = time.monotonic()
                 held_now.set()
                 try:
-                    code, answer = relay.call("POST", f"/asks/take?wait={TAKE_HOLD_S}", owner=True)
+                    code, answer = relay.call("POST", f"/asks/take?wait={hold}", owner=True)
                 finally:
                     held_now.clear()
                 held = time.monotonic() - asked >= 1  # the relay kept the request open: no need to wait before the next
@@ -1050,10 +1129,18 @@ def serve(folder: Path) -> int:
                     published = None
                     time.sleep(2)
                     continue
+                if code == 503 and hold > TAKE_HOLD_LEAST_S:
+                    # The relay's host cut the held request (Cloudflare: error 1102, too much work in one
+                    # request). A shorter hold is less work: ask again at once, nothing was lost.
+                    hold, hold_since = shorter_hold(hold), time.time()
+                    log(folder, f"the relay cut a held request (503): holding {hold} s from now on")
+                    continue
                 if code != 200:
                     raise OSError(f"the relay answered {code}")
                 now = time.time()
                 status["contact"] = int(now)
+                if hold < TAKE_HOLD_S and now - hold_since >= HOLD_LONGER_AFTER_S:
+                    hold, hold_since = hold + 1, now
                 if status["error"] or not said:
                     note("")
                 asks = json.loads(answer.decode("utf-8")).get("asks", [])
@@ -1364,6 +1451,7 @@ def wait_for_code(folder: Path) -> int:
     secret = int(kept["secret"], 16)
     mine = code_public(kept["code"], secret)
     tries, ended = CODE_TRIES, "expired"
+    hold = TAKE_HOLD_S
 
     def answer(ask: dict, reply: dict) -> None:
         relay.call("PUT", "/answer/" + str(ask.get("id", "")), json.dumps(reply), owner=True)
@@ -1372,10 +1460,13 @@ def wait_for_code(folder: Path) -> int:
         while ended == "expired" and time.time() < kept["made"] + CODE_VALID_S:
             left = kept["made"] + CODE_VALID_S - time.time()
             try:
-                status, body = relay.call("POST", f"/asks/take?wait={int(max(1, min(TAKE_HOLD_S, left)))}", owner=True)
+                status, body = relay.call("POST", f"/asks/take?wait={int(max(1, min(hold, left)))}", owner=True)
                 if status == 404:  # a newer code, `forget`, or another PC's room by now
                     ended = "ended"
                     break
+                if status == 503 and hold > TAKE_HOLD_LEAST_S:  # the relay's host cut the held request: hold shorter
+                    hold = shorter_hold(hold)
+                    continue
                 if status != 200:
                     raise OSError(f"the relay answered {status}")
                 asks = json.loads(body.decode("utf-8")).get("asks", [])
@@ -1691,7 +1782,8 @@ def command_step(folder: Path, words: list[str], named: str, title: str, agent: 
     return 0
 
 
-def command_board(folder: Path, notes: str, no_notes: bool, machine: str, agent: str, this: str = "") -> int:
+def command_board(folder: Path, notes: str, no_notes: bool, machine: str, agent: str, this: str = "",
+                  ids: bool = False) -> int:
     found = settings(folder)
     if no_notes:
         for name in ("notes", "notesMachine", "notesAgent", "notesThis"):
@@ -1721,12 +1813,38 @@ def command_board(folder: Path, notes: str, no_notes: bool, machine: str, agent:
         at = time.strftime("%H:%M " if today else "%d %b", time.localtime(row["updated"]))
         state = "running" + (f" {row['progress']}%" if row["progress"] is not None else "") if row["state"] == "live" else row["state"]
         who = " · ".join(part for part in (row["machine"], row["agent"]) if part)
-        print(f"  {at}  {state:<12} {row['title']}" + (f"  [{who}]" if who else ""))
+        print(f"  {at}  {state:<12} {row['title']}" + (f"  [{who}]" if who else "") + (f"  id={row['id']}" if ids else ""))
         if row["steps"]:
             print(f"         {time.strftime('%H:%M', time.localtime(row['steps'][-1][0]))} {row['steps'][-1][1]}")
     if len(rows) > BOARD_ROWS:
         print(f"  ... and {len(rows) - BOARD_ROWS} older. The page shows the first {BOARD_ROWS} too.")
     return 0
+
+
+def command_remove(folder: Path, rows: list[str], back: bool) -> int:
+    """Takes rows off the board (`board --ids` names them), or lists a removed session note again."""
+    if not rows:
+        gone = removed(folder)
+        print("Session notes removed from the board:" if gone else "No session note is removed from the board.")
+        for name, when in sorted(gone.items(), key=lambda item: -item[1]):
+            print(f"  {time.strftime('%d %b %H:%M', time.localtime(when))}  {name}")
+        print(f"Remove a row:  {ME} remove <id>   (ids: `{ME} board --ids`).  List one again:  {ME} remove --back <id>")
+        return 0
+    missing = 0
+    for row in rows:
+        if back:
+            done = restore_row(folder, row)
+            print(f"{row} is listed again." if done else f"{row} was not removed.")
+        else:
+            what = remove_row(folder, row)
+            print(f"Removed the chat {row}: off the board and out of phone mode." if what == "chat" else
+                  f"Removed {row} from the board. The note itself is untouched." if what == "note" else
+                  f"No row {row}. `{ME} board --ids` lists them.")
+            done = bool(what)
+        missing += not done
+    if missing < len(rows) and paired(settings(folder)):
+        start_helper(folder)
+    return 2 if missing else 0
 
 
 def command_view(folder: Path) -> int:
@@ -1918,6 +2036,10 @@ def main(arguments: list[str] | None = None) -> int:
     board.add_argument("--agent", default="", help="with --notes: only the notes of this agent (default: all)")
     board.add_argument("--this", default="", help="with --notes: the name the notes give this computer, so the page lists them under one name")
     board.add_argument("--no-notes", action="store_true", help="stop reading the folder of notes")
+    board.add_argument("--ids", action="store_true", help="print each row's id, for `remove`")
+    remove = commands.add_parser("remove", help="take a chat off the board and the chat list")
+    remove.add_argument("--back", action="store_true", help="list a removed session note again")
+    remove.add_argument("rows", nargs="*", help="row ids as `board --ids` prints them; none: what was removed")
     commands.add_parser("view", help="open the page on this PC's own browser, on All chats")
     commands.add_parser("status", help="what is linked and running")  # listen: 0 prompt or none, 3 off, 4 replaced
     commands.add_parser("serve", help="run the helper in this window (it normally starts by itself)")
@@ -1948,7 +2070,9 @@ def main(arguments: list[str] | None = None) -> int:
     if chosen.command == "step":
         return command_step(folder, chosen.words, chosen.chat, chosen.title, chosen.agent, chosen.progress, chosen.end)
     if chosen.command == "board":
-        return command_board(folder, chosen.notes, chosen.no_notes, chosen.machine, chosen.agent, chosen.this)
+        return command_board(folder, chosen.notes, chosen.no_notes, chosen.machine, chosen.agent, chosen.this, chosen.ids)
+    if chosen.command == "remove":
+        return command_remove(folder, chosen.rows, chosen.back)
     if chosen.command == "view":
         return command_view(folder)
     if chosen.command == "status":

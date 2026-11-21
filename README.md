@@ -82,6 +82,14 @@ page out on a port only that computer can reach, so it is the version of this re
 computer there too: on that one `pair --code`, then on the page **Device**, **+ Add device**, its
 4 digits. `vector_relay.py board` prints the list in the terminal.
 
+**Remove a row:** open it and tap **Remove from the list**, then tap again to confirm. Every
+computer of the page that lists the row takes it off. A chat leaves phone mode with it (its
+`listen` ends with `OFF`; the chat itself goes on in its app and is back with its next `on`). A
+session note is not touched: its computer only stops listing it, until that chat writes a new
+line. A computer that does not answer keeps its row, and the page says which one. On the computer
+itself: `vector_relay.py board --ids` prints the ids, `remove <id>` removes, `remove` lists the
+removed session notes and `remove --back <id>` lists one again.
+
 How fresh it is: the computer whose chats the page shows answers every few seconds. Every other
 computer is asked every 20 seconds while All chats is open. One that does not answer (asleep, or
 no helper running) shows the copy the relay keeps, which a helper renews at most every 2 minutes,
@@ -182,22 +190,31 @@ is safe; your own gives you your own free quota.
 
 ## Relay budget
 
-Cloudflare's free plan gives an account 100,000 requests a day. The relay holds the helper's
-request open until the phone asks something, so a chat that waits all day with the phone closed
-costs about 180 requests an hour (4,300 a day). With the page open on the phone it is about
-2,000 an hour, and up to 6,000 while a chat is busy. The helper stops by itself 10 minutes after
+Cloudflare's free plan gives an account 100,000 requests a day, and one request about 10 ms of
+processor time. The relay holds the helper's request open until the phone asks something, for 8
+seconds at most: a request held for 20 seconds looked into the database about 28 times, and on
+2026-11-21 Cloudflare cut two of three of those (error 1102, shown as 503), so no computer
+answered. A request now makes at most 10 looks, and a helper that is cut all the same halves its
+hold by itself (down to 2 seconds) and tries a longer one again after 10 quiet minutes.
+
+So a computer whose helper waits all day with the phone closed costs about 450 requests an hour
+(10,800 a day), however many of its chats wait. With the page open on the phone it is about
+2,500 an hour, and up to 6,500 while a chat is busy. The helper stops by itself 10 minutes after
 the last chat leaves phone mode, unless it is kept for All chats (`board --notes`, or a chat that
-posted a step in the last 6 hours): then it costs the same 180 requests an hour while it runs.
+posted a step in the last 6 hours): then it costs the same 450 requests an hour while it runs.
 
 ## Tests
 
-    python -m unittest discover -s tests   82 tests: seal, feed, inbox, chats, pictures, the board, commands,
-                                           whole trips, local mode, the 4-digit code, the list of versions
+    python -m unittest discover -s tests   88 tests: seal, feed, inbox, chats, pictures, the board, removing a row,
+                                           commands, whole trips, a relay that cuts held requests, local mode,
+                                           the 4-digit code, the list of versions
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
-                                           (as a Pixel 7 and as a wide screen), relay rules in memory: 91 steps
+                                           (as a Pixel 7 and as a wide screen), relay rules in memory: 99 steps.
+                                           Two of them run the relay's own file on a database that only
+                                           counts: a held request ends after 8 s and 10 looks at most
     python scripts/e2e.py --live           the deployed page and relay, on throwaway channels that
-                                           are wiped at the end: 88 steps. The 8 local Wi-Fi steps
-                                           are left out (they use no relay), and 5 are added: a
+                                           are wiped at the end: 94 steps. The 8 local Wi-Fi steps
+                                           and the 2 on the relay's file are left out, and 5 are added: a
                                            phone with no computer yet adds its first one by code,
                                            and the channel is wiped
 
@@ -205,7 +222,8 @@ posted a step in the last 6 hours): then it costs the same 180 requests an hour 
 
 Checked on the page as deployed: 1.3.2 went to vector-relay.pages.dev on 2026-11-21, and
 `python scripts/e2e.py --live` then passed 88 of 88 steps from a Windows computer, All chats
-included. Not yet checked: a real iPhone (WebKit is the closest stand-in).
+included. Not yet checked: 1.3.3 as deployed (its relay and page are checked on this computer
+only: the page from this repo, the relay's file in a browser), and a real iPhone on All chats.
 
 ## Versions
 
@@ -214,6 +232,7 @@ the chat list); `CHANGELOG.md` and the lines below are made from it by
 `python scripts/make_changelog.py`.
 
 <!-- versions:start -->
+- **1.3.3** (2026-11-21) The computers answer again, and a row can be removed. Fixed: no computer answered the page for hours. The relay's host cut the requests the relay held for 20 seconds (Cloudflare error 1102, shown as 503). The relay now holds a request for 8 seconds at most and looks into its database at most 10 times in one request; the helper asks for 8 seconds and, when a request is cut all the same, asks again at once with half the hold. The page looks again when a request for an answer is cut, where it showed an error before. All chats: an open row has **Remove from the list**, with a second tap to confirm. A chat leaves phone mode and the list; a session note is not touched, its computer only stops listing it until its chat writes a new line. The row leaves every computer that lists it, also another computer of the page. On the computer: `remove <id>` does the same (`board --ids` prints the ids), `remove` lists the removed session notes and `remove --back <id>` lists one again. A removed row leaves the copy the relay keeps within seconds, not after the usual two minutes.
 - **1.3.2** (2026-11-21) One computer, one name on All chats. `board --notes <folder> --this "<name>"` says which name the session notes give this computer. All chats then lists those notes under the name the computer has on the page, where it counted as one more computer before. The pictures in the README are drawn under a made-up computer name, never the real name of the computer that ran the checks.
 - **1.3.1** (2026-11-21) All chats on real notes: three fixes. A session note whose log has a line out of order no longer counts as ended tomorrow: it stood on top of Ended, marked "now". A chat that was already in phone mode when its computer moved to 1.3.0 is on All chats too. A Mac whose network name is its address shows under its computer name on the page, not as "192". The unit tests no longer fail now and then on a computer where Vector Relay is in use: a test folder that shares its guard port with the running helper is not used.
 - **1.3.0** (2026-11-21) All chats: what every chat on every computer is doing. All chats on the page: every chat of every computer it knows, the running ones first, each with its last step, how far it is and when. A row opens to its last steps, and one computer can be looked at alone. A chat says what it is doing without phone mode: `step --title "..." "..."` starts its row, `step --chat <id> "..."` adds a step, `--end shipped` ends it. A chat in phone mode is listed by itself, and what it says to the phone is its step. `board --notes <folder>` also lists the chats written down as session notes in that folder (the format Cairn writes), each under the computer its note names. `view` opens the page on the computer itself, already linked, on All chats. `board` prints the same list in the terminal. A computer that is asleep still shows what it last said. One with an older Vector Relay shows its chats in phone mode.

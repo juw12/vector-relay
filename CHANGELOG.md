@@ -3,6 +3,14 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
+## 1.3.3 - 2026-11-21: The computers answer again, and a row can be removed ([#8](https://github.com/juw12/vector-relay/pull/8))
+
+- Fixed: no computer answered the page for hours. The relay's host cut the requests the relay held for 20 seconds (Cloudflare error 1102, shown as 503). The relay now holds a request for 8 seconds at most and looks into its database at most 10 times in one request; the helper asks for 8 seconds and, when a request is cut all the same, asks again at once with half the hold.
+- The page looks again when a request for an answer is cut, where it showed an error before.
+- All chats: an open row has **Remove from the list**, with a second tap to confirm. A chat leaves phone mode and the list; a session note is not touched, its computer only stops listing it until its chat writes a new line. The row leaves every computer that lists it, also another computer of the page.
+- On the computer: `remove <id>` does the same (`board --ids` prints the ids), `remove` lists the removed session notes and `remove --back <id>` lists one again.
+- A removed row leaves the copy the relay keeps within seconds, not after the usual two minutes.
+
 ## 1.3.2 - 2026-11-21: One computer, one name on All chats ([#6](https://github.com/juw12/vector-relay/pull/6))
 
 - `board --notes <folder> --this "<name>"` says which name the session notes give this computer. All chats then lists those notes under the name the computer has on the page, where it counted as one more computer before.
