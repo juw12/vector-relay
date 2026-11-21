@@ -415,7 +415,7 @@ def board_trip(playwright, expect, relay_address: str = "", page_address: str = 
             legacy.locator(".row-head").click()
             legacy.locator(".remove-row").click()
             legacy.locator(".remove-row").click()
-            expect(legacy.locator(".remove-note.bad")).to_contain_text("Old PC did not answer", timeout=slow)
+            expect(legacy.locator(".remove-note.bad")).to_contain_text("Old PC did not answer", timeout=35_000)  # the page waits 20 s for it
             check(legacy.count() == 1 and legacy.locator(".remove-row").inner_text() == "Remove from the list",
                   "remove: a computer that does not answer keeps its row, and the page says which computer and why")
             context.close()

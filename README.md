@@ -220,10 +220,11 @@ posted a step in the last 6 hours): then it costs the same 450 requests an hour 
 
 `scripts/e2e.py` needs `pip install playwright` and `playwright install webkit chromium`.
 
-Checked on the page as deployed: 1.3.2 went to vector-relay.pages.dev on 2026-11-21, and
-`python scripts/e2e.py --live` then passed 88 of 88 steps from a Windows computer, All chats
-included. Not yet checked: 1.3.3 as deployed (its relay and page are checked on this computer
-only: the page from this repo, the relay's file in a browser), and a real iPhone on All chats.
+Checked on the page as deployed: 1.3.3 went to vector-relay.pages.dev on 2026-11-22, and
+`python scripts/e2e.py --live` then passed 94 of 94 steps from a Mac. A request the relay is asked
+to hold for 20 seconds comes back after 7 and is not cut. From a busy Windows computer behind an
+office proxy the same run took 15 minutes and 3 steps failed on time (one of them the 9 seconds
+a computer had to confirm a Remove, 20 since 1.3.4). Not yet checked: a real iPhone on All chats.
 
 ## Versions
 
@@ -232,6 +233,7 @@ the chat list); `CHANGELOG.md` and the lines below are made from it by
 `python scripts/make_changelog.py`.
 
 <!-- versions:start -->
+- **1.3.4** (2026-11-22) Remove waits longer for a busy computer. Remove from the list gives a computer 20 seconds to say it removed the row, where it gave 9. A busy computer behind an office proxy took longer than 9: the page said it did not answer, and the row left a moment later all the same.
 - **1.3.3** (2026-11-21) The computers answer again, and a row can be removed. Fixed: no computer answered the page for hours. The relay's host cut the requests the relay held for 20 seconds (Cloudflare error 1102, shown as 503). The relay now holds a request for 8 seconds at most and looks into its database at most 10 times in one request; the helper asks for 8 seconds and, when a request is cut all the same, asks again at once with half the hold. The page looks again when a request for an answer is cut, where it showed an error before. All chats: an open row has **Remove from the list**, with a second tap to confirm. A chat leaves phone mode and the list; a session note is not touched, its computer only stops listing it until its chat writes a new line. The row leaves every computer that lists it, also another computer of the page. On the computer: `remove <id>` does the same (`board --ids` prints the ids), `remove` lists the removed session notes and `remove --back <id>` lists one again. A removed row leaves the copy the relay keeps within seconds, not after the usual two minutes.
 - **1.3.2** (2026-11-21) One computer, one name on All chats. `board --notes <folder> --this "<name>"` says which name the session notes give this computer. All chats then lists those notes under the name the computer has on the page, where it counted as one more computer before. The pictures in the README are drawn under a made-up computer name, never the real name of the computer that ran the checks.
 - **1.3.1** (2026-11-21) All chats on real notes: three fixes. A session note whose log has a line out of order no longer counts as ended tomorrow: it stood on top of Ended, marked "now". A chat that was already in phone mode when its computer moved to 1.3.0 is on All chats too. A Mac whose network name is its address shows under its computer name on the page, not as "192". The unit tests no longer fail now and then on a computer where Vector Relay is in use: a test folder that shares its guard port with the running helper is not used.
