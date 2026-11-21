@@ -13,6 +13,9 @@ phone needs the internet, not your Wi-Fi.
 - **Several chats at once.** Each chat in phone mode is a chip at the top of the page. Tap one to
   read it and to send to it; a chip gets an orange mark when its chat said something new.
 - A chat can **wait for you all day**. Waiting costs the chat nothing.
+- **All chats.** One list of every chat on every computer you added, the running ones first,
+  each with its last step. Also for chats that are not in phone mode, and also on the computer
+  itself: `vector_relay.py view`. See [All chats](#all-chats-what-every-chat-is-doing).
 - The phone says in plain words what is going on: *Vector is working*, *Vector is waiting for
   your prompt*, *Your PC does not answer*.
 - It is a web page, kept on the iPhone Home Screen like an app. Nothing to install from a store.
@@ -39,12 +42,59 @@ The skill in `skill/phone-relay/SKILL.md` teaches a chat this loop: type `/phone
 
 Other commands: `pair` links a phone (QR code, or `--code` for 4 digits), `off` takes a chat out of
 phone mode, `status` says what is linked and running, `stop` stops the background helper (the next
-`on` starts it again), `forget` unlinks every phone and clears the feed.
+`on` starts it again), `forget` unlinks every phone and clears the feed. `step`, `board` and `view`
+are for [All chats](#all-chats-what-every-chat-is-doing).
 `pair --local` uses no relay at all: the PC itself serves the page to a phone on the same Wi-Fi.
 
 The page and the relay live at one address, [vector-relay.pages.dev](https://vector-relay.pages.dev):
 a Cloudflare Pages project with one Pages Function (`functions/`) and one D1 database
 (`schema.sql`). It shares nothing with any other app.
+
+## All chats: what every chat is doing
+
+The chat list has **All chats** on top. It lists every chat of every computer the page knows:
+what it is about, on which computer, whether it runs, how far it is, and its last step. Tap a row
+for its last five steps. A chat that is in phone mode has **Open this chat** there, which leads to
+its prompt box. With more than one computer, a row of names lets you look at one alone.
+
+| On a wide screen | On the phone |
+|---|---|
+| ![All chats on a wide screen](shots/desktop-all-chats.png) | ![All chats on the phone](shots/phone-all-chats.png) |
+
+A chat gets on the list in one of three ways:
+
+| How | What to run |
+|---|---|
+| It is in phone mode | Nothing. `on` lists it, and each `say` is its step. `off` ends it. |
+| It posts its own steps | `vector_relay.py step --title "Atlas FA" "reading the leak data"` prints `ok chat=<id>`. Then `step --chat <id> --progress 40 "tests green"`, and `step --chat <id> --end shipped "report sent"` when it is over (`shipped`, `partial`, `dropped` or `done`). |
+| Its computer keeps session notes | `vector_relay.py board --notes <folder>` once. Every note in that folder is a row. `--machine <name>` or `--agent <name>` takes only those; `board --no-notes` stops it. |
+
+A session note is a Markdown file as [Cairn](https://github.com/juw12/cairn) writes them: a head
+with `title`, `status` (`live`, `shipped`, `partial`, `dropped`, `done`), `started`
+(`2026-11-21T10:01`), `machine` and `agent`, then `## Log` with lines like
+`- 10:15 note: [40%] tests green`. A folder that several computers share shows each note under
+the computer it names, once, whichever computer published it.
+
+**On the computer itself:** `vector_relay.py view` opens the page in the browser there, already
+linked to that computer and on All chats. No phone and no code are needed. The helper hands the
+page out on a port only that computer can reach, so it is the version of this repo. To see a second
+computer there too: on that one `pair --code`, then on the page **Device**, **+ Add device**, its
+4 digits. `vector_relay.py board` prints the list in the terminal.
+
+How fresh it is: the computer whose chats the page shows answers every few seconds. Every other
+computer is asked every 20 seconds while All chats is open. One that does not answer (asleep, or
+no helper running) shows the copy the relay keeps, which a helper renews at most every 2 minutes,
+and the foot of the list says when each computer was last heard.
+
+- A chat is on the list only when one of the three ways above puts it there. Vector Relay does
+  not look into the chat app.
+- A running chat with no step for 6 hours is shown as *no word since ...* under Ended. A chat
+  that ended stays 7 days. The list holds 40 chats: all that run, then the ones that ended last.
+- With `board --notes`, or while a chat that posts steps runs, the helper keeps running without
+  any chat in phone mode. `step`, `on`, `view` and `board --notes` start it; nothing starts it
+  after a restart of the computer until one of them runs.
+- A computer with a Vector Relay from before 1.3.0 shows only its chats in phone mode, and the
+  foot of the list says so.
 
 ## Set it up (once)
 
@@ -135,24 +185,27 @@ Cloudflare's free plan gives an account 100,000 requests a day. The relay holds 
 request open until the phone asks something, so a chat that waits all day with the phone closed
 costs about 180 requests an hour (4,300 a day). With the page open on the phone it is about
 2,000 an hour, and up to 6,000 while a chat is busy. The helper stops by itself 10 minutes after
-the last chat leaves phone mode.
+the last chat leaves phone mode, unless it is kept for All chats (`board --notes`, or a chat that
+posted a step in the last 6 hours): then it costs the same 180 requests an hour while it runs.
 
 ## Tests
 
-    python -m unittest discover -s tests   64 tests: seal, feed, inbox, chats, pictures, commands, whole trips,
-                                           local mode, the 4-digit code, the list of versions
+    python -m unittest discover -s tests   78 tests: seal, feed, inbox, chats, pictures, the board, commands,
+                                           whole trips, local mode, the 4-digit code, the list of versions
     python scripts/e2e.py                  the phone page in WebKit (as an iPhone 14) and Chromium
-                                           (as a Pixel 7), relay rules in memory: 68 steps
+                                           (as a Pixel 7 and as a wide screen), relay rules in memory: 90 steps
     python scripts/e2e.py --live           the deployed page and relay, on throwaway channels that
-                                           are wiped at the end: 65 steps. The 8 local Wi-Fi steps
+                                           are wiped at the end: 87 steps. The 8 local Wi-Fi steps
                                            are left out (they use no relay), and 5 are added: a
                                            phone with no computer yet adds its first one by code,
                                            and the channel is wiped
 
 `scripts/e2e.py` needs `pip install playwright` and `playwright install webkit chromium`.
 
-Not yet checked: a real iPhone (WebKit on Windows is the closest stand-in), and a Mac as the
-second computer on the public relay (the Mac build was checked on a relay of its own).
+Not yet checked: a real iPhone (WebKit is the closest stand-in), and All chats on the page as
+deployed: 1.3.0 was written on a Mac, and the page at vector-relay.pages.dev is deployed from
+another computer. Its 22 steps pass on the deployed relay with the page from this repo; the 87
+of `--live` are to be run after that deploy.
 
 ## Versions
 
@@ -161,6 +214,7 @@ the chat list); `CHANGELOG.md` and the lines below are made from it by
 `python scripts/make_changelog.py`.
 
 <!-- versions:start -->
+- **1.3.0** (2026-11-21) All chats: what every chat on every computer is doing. All chats on the page: every chat of every computer it knows, the running ones first, each with its last step, how far it is and when. A row opens to its last steps, and one computer can be looked at alone. A chat says what it is doing without phone mode: `step --title "..." "..."` starts its row, `step --chat <id> "..."` adds a step, `--end shipped` ends it. A chat in phone mode is listed by itself, and what it says to the phone is its step. `board --notes <folder>` also lists the chats written down as session notes in that folder (the format Cairn writes), each under the computer its note names. `view` opens the page on the computer itself, already linked, on All chats. `board` prints the same list in the terminal. A computer that is asleep still shows what it last said. One with an older Vector Relay shows its chats in phone mode.
 - **1.2.2** (2026-11-20) Version history on the phone. The chat list on the phone has a Version history button: every version and what changed in it. One list of versions (docs/versions.json) now feeds the phone page, CHANGELOG.md and the README.
 - **1.2.1** (2026-11-20) The code alone, and the phone names the computer. `pair --code` prints the code alone, with no QR lines to read past. `pair --no-code` takes a code back. A second computer gets its code right after the first one was used (it was refused for 15 seconds before). Right after a computer is added, the phone names it and says the next step, where it showed an error until a chat was in phone mode. A computer whose chats all left phone mode shows the same calm line instead of "Your PC does not answer".
 - **1.2.0** (2026-11-20) Add a computer with a 4-digit code. Add a computer on the phone by typing 4 digits instead of scanning a QR code or pasting a link.
@@ -175,7 +229,7 @@ the chat list); `CHANGELOG.md` and the lines below are made from it by
 | `vector_relay.py` | The PC side, one file. |
 | `docs/` | The phone page. |
 | `functions/c/[[path]].js`, `schema.sql`, `wrangler.toml` | The relay: a Pages Function and its D1 database. |
-| `skill/phone-relay/SKILL.md` | The `/phone` skill for the chat's agent. |
+| `skill/phone-relay/SKILL.md` | The `/phone` skill for the chat's agent, with the steps for All chats. |
 | `tests/`, `scripts/e2e.py` | The checks above. |
 | `docs/versions.json`, `scripts/make_changelog.py`, `CHANGELOG.md` | The list of versions, and what is made from it. |
 

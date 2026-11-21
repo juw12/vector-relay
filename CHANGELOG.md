@@ -3,6 +3,14 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
+## 1.3.0 - 2026-11-21: All chats: what every chat on every computer is doing ([#4](https://github.com/juw12/vector-relay/pull/4))
+
+- All chats on the page: every chat of every computer it knows, the running ones first, each with its last step, how far it is and when. A row opens to its last steps, and one computer can be looked at alone.
+- A chat says what it is doing without phone mode: `step --title "..." "..."` starts its row, `step --chat <id> "..."` adds a step, `--end shipped` ends it. A chat in phone mode is listed by itself, and what it says to the phone is its step.
+- `board --notes <folder>` also lists the chats written down as session notes in that folder (the format Cairn writes), each under the computer its note names.
+- `view` opens the page on the computer itself, already linked, on All chats. `board` prints the same list in the terminal.
+- A computer that is asleep still shows what it last said. One with an older Vector Relay shows its chats in phone mode.
+
 ## 1.2.2 - 2026-11-20: Version history on the phone ([#3](https://github.com/juw12/vector-relay/pull/3))
 
 - The chat list on the phone has a Version history button: every version and what changed in it.
