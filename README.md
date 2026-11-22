@@ -16,8 +16,8 @@ phone needs the internet, not your Wi-Fi.
 - **All chats.** One list of every chat on every computer you added, the running ones first,
   each with its last step. Also for chats that are not in phone mode, and also on the computer
   itself: `vector_relay.py view`. See [All chats](#all-chats-what-every-chat-is-doing).
-- The phone says in plain words what is going on: *Vector is working*, *Vector is waiting for
-  your prompt*, *Your PC does not answer*.
+- The phone says in plain words what is going on: *Vector is working*, *Finished 18:40 · send a
+  prompt any time*, *Vector is waiting for your prompt*, *Your PC does not answer*.
 - It is a web page, kept on the iPhone Home Screen like an app. Nothing to install from a store.
 
 | A picture from the chat | Two chats, and a photo from the phone | Dark |
@@ -36,7 +36,7 @@ tools it already has:
 |---|---|
 | `vector_relay.py on --label "Atlas FA"` | Phone mode on for this chat. Prints the chat's id and starts the small background helper. |
 | `vector_relay.py say --chat <id> "reading the leak data"` | Posts an update. `--kind result --file result.md` posts a result, `--image plot.png` a picture. |
-| `vector_relay.py listen --chat <id>` | Waits for the next prompt from the phone and prints it. A photo arrives as `IMAGE <path of the file>`. |
+| `vector_relay.py listen --asked --chat <id>` | Waits for the next prompt from the phone and prints it. A photo arrives as `IMAGE <path of the file>`. Only for a chat that was told to wait: without `--asked` it ends at once with `OFF`, and the phone desk takes the prompt. |
 
 The skill in `skill/phone-relay/SKILL.md` teaches a chat this loop: type `/phone` in the chat.
 
@@ -267,6 +267,7 @@ the chat list); `CHANGELOG.md` and the lines below are made from it by
 `python scripts/make_changelog.py`.
 
 <!-- versions:start -->
+- **1.4.0** (2026-11-22) No chat waits for the phone, and a finished chat can still be prompted. The phone desk (`desk.py`): one background process per computer takes the next prompt for every chat in phone mode that has finished, and has it carried out. A chat posts its result and ends its turn; it no longer sits in `listen`. `listen` ends at once with `OFF` unless it is run with `--asked`, for a chat that was told to wait for the phone. The chat stays in phone mode. The page says **Finished 18:40** for a chat whose last word is its result, and **Finished 18:40 · send a prompt any time** while the desk holds it. Before, it said the chat was working and, after 30 minutes, that it may have stopped. All chats marks such a chat finished and keeps it in the list until Remove. `status` on the computer uses the same words. The skill: phone mode goes on by itself at the start of a chat that does real work, and waiting is only for a chat that was told to wait.
 - **1.3.4** (2026-11-22) Remove waits longer for a busy computer. Remove from the list gives a computer 20 seconds to say it removed the row, where it gave 9. A busy computer behind an office proxy took longer than 9: the page said it did not answer, and the row left a moment later all the same.
 - **1.3.3** (2026-11-21) The computers answer again, and a row can be removed. Fixed: no computer answered the page for hours. The relay's host cut the requests the relay held for 20 seconds (Cloudflare error 1102, shown as 503). The relay now holds a request for 8 seconds at most and looks into its database at most 10 times in one request; the helper asks for 8 seconds and, when a request is cut all the same, asks again at once with half the hold. The page looks again when a request for an answer is cut, where it showed an error before. All chats: an open row has **Remove from the list**, with a second tap to confirm. A chat leaves phone mode and the list; a session note is not touched, its computer only stops listing it until its chat writes a new line. The row leaves every computer that lists it, also another computer of the page. On the computer: `remove <id>` does the same (`board --ids` prints the ids), `remove` lists the removed session notes and `remove --back <id>` lists one again. A removed row leaves the copy the relay keeps within seconds, not after the usual two minutes.
 - **1.3.2** (2026-11-21) One computer, one name on All chats. `board --notes <folder> --this "<name>"` says which name the session notes give this computer. All chats then lists those notes under the name the computer has on the page, where it counted as one more computer before. The pictures in the README are drawn under a made-up computer name, never the real name of the computer that ran the checks.

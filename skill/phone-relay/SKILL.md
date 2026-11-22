@@ -1,18 +1,43 @@
 ---
 name: phone-relay
-description: Phone mode for this chat (Vector Relay). Juwen sees this chat's updates, results and pictures on his iPhone and sends the next prompts (and photos) from there, from anywhere. Several chats can be in phone mode at once. Use when he types /phone, says "phone mode", "relay this to my phone", "I'm leaving my desk, keep going", "continue from my phone", or "stop phone mode". Also /phone code ("add this computer to my phone", "give me the code"): 4 digits to type on the phone instead of scanning the QR code. Also /phone view ("show me all chats", "what are my chats doing", "open the relay here") and /phone step ("put this chat on the board", "list this chat"): All chats, the list of every chat on every computer with its last step.
+description: Every chat that does real work puts itself in phone mode at its start, without being asked (Vector Relay): on, a line at each milestone, the result, then the turn ends. It does not wait for the phone; the phone desk takes a later prompt. Phone mode for this chat (Vector Relay). Juwen sees this chat's updates, results and pictures on his iPhone and sends the next prompts (and photos) from there, from anywhere. Several chats can be in phone mode at once. Use when he types /phone, says "phone mode", "relay this to my phone", "I'm leaving my desk, keep going", "continue from my phone", or "stop phone mode". Also /phone code ("add this computer to my phone", "give me the code"): 4 digits to type on the phone instead of scanning the QR code. Also /phone view ("show me all chats", "what are my chats doing", "open the relay here") and /phone step ("put this chat on the board", "list this chat"): All chats, the list of every chat on every computer with its last step.
 ---
 
 # Phone mode (Vector Relay)
 
-Vector Relay is a small relay: this chat posts updates, results and pictures to Juwen's phone, and
-waits for his next prompt from the phone. You run it with your normal tools. It never touches the
+Vector Relay is a small relay: this chat posts updates, results and pictures to Juwen's phone. His
+next prompt from the phone is taken by the phone desk, a background process on this computer, or
+by this chat when he told it to wait. You run it with your normal tools. It never touches the
 chat app itself. His phone needs the internet only, not the office Wi-Fi.
 
     RELAY = python E:\Projects\vector-relay\vector_relay.py
 
 (On another computer, put its own path here and in the waiting snippet below. On a Mac:
 `python3 ~/vector-relay/vector_relay.py`.)
+
+## Automatic: on at the start of every chat that does real work
+
+He does not type /phone. A chat that does real work (code, a release, a longer investigation; not
+a short question) puts itself on the phone, so every device shows it:
+
+1. A later turn of a chat that already has an id starts with `DESK feed --chat <id>`
+   (`DESK` is `desk.py` beside `vector_relay.py`). It prints what was said in this chat, also what
+   the phone desk did for a prompt he sent while the chat was closed. Go on from there.
+2. `RELAY on --label "<2-4 words>"` (a later turn: `RELAY on --chat <id> --label "..."`), then
+   `RELAY say --chat <id> --kind prompt "<his words>"`.
+3. One plain line at each real milestone, and the final answer as a result (While you work, below).
+4. Write the reply in the chat and end the turn. **Do not run `listen` and do not run `off`.** The
+   chat stays in phone mode and on All chats, marked finished, until he removes it. A chat that
+   keeps a command running looks unfinished to him.
+5. Never start another command that waits for him, a phone, another computer or a clock and keeps
+   the turn open for it.
+
+The phone desk (`DESK status`, `DESK install`, `DESK remove`) holds the line of every chat in
+phone mode that has posted its result. A prompt he sends then is carried out by an agent the desk
+starts, in the folder the chat worked in, and the answer is posted under the same chat id. So the
+result must be posted (step 3): that is what hands the chat's line to the desk. The computer's own
+standing decision says the same (on the ASUS decisions/0059, on the MacBook Pro mac-0030); where
+the two differ, the decision wins.
 
 ## Start
 
@@ -99,14 +124,18 @@ in phone mode puts itself there with `step`:
 - Do not post passwords, keys, tokens or codes to the phone.
 - Also write the normal reply in the chat. The phone is a second screen, not the only one.
 
-## Wait for the next prompt
+## Wait for the next prompt (only when he says "wait for my phone")
+
+Waiting is not the default. A chat waits only when he said in this chat, in so many words, that it
+must wait for his phone. `listen` without `--asked` ends at once with `OFF` and leaves the chat in
+phone mode.
 
 Wait inside **one** `python` tool call, so waiting costs no turns however long it takes:
 
 ```python
 import json
 
-command = r'python E:\Projects\vector-relay\vector_relay.py listen --wait 43200 --chat <id>'
+command = r'python E:\Projects\vector-relay\vector_relay.py listen --asked --wait 43200 --chat <id>'
 heard = ""
 try:
     reply = json.loads(tools.exec_command(cmd=command, yield_time_ms=30000).output)
@@ -124,13 +153,13 @@ print(heard[-21000:])
 | `PROMPT id=... at=HH:MM chat=<id>` then the text | His next prompt from the phone | Carry it out like a message he typed here, post updates and the result, then wait again |
 | a line `IMAGE <path>` before the text | He sent a photo with it | Look at it with `read_file <path>` before you answer |
 | `NONE` | 12 hours with nothing | Wait again |
-| `OFF` | Phone mode was switched off for this chat | Stop the loop |
+| `OFF` | Phone mode was switched off for this chat, or `listen` ran without `--asked` (the line says so) | Stop the loop |
 | `REPLACED` | A newer `listen` for this chat took over | Stop this one; nothing is lost |
 | the tool call ended some other way | The host cut the wait short | Wait again: a new `listen` takes over from one left behind |
 
-Stop the loop and run `RELAY off --chat <id>` when:
-- a phone prompt says stop / done / "phone off" (answer on the phone first: `say "Phone mode off."`),
-- he types in the chat on the PC (he is back).
+Stop the loop when he types in the chat on the PC (he is back): the chat stays in phone mode.
+Run `RELAY off --chat <id>` only when he says so: a phone prompt says "phone off" (answer on the
+phone first: `say "Phone mode off."`), or he asks for it in the chat.
 
 There is no time limit: a chat may stay in phone mode all day.
 
@@ -145,6 +174,8 @@ There is no time limit: a chat may stay in phone mode all day.
 - Use only your own chat id. Never `say`, `listen` or `off` with another chat's id, and never
   `off --all` unless he asks for it.
 - Never start the helper yourself and never leave `listen` running after the loop ends.
+- Never run `listen` because a turn is over. Never run `off`, `remove` or `forget` to tidy up: a
+  finished chat stays listed until he removes it.
 - `step` only with your own chat id. Never end or rename another chat's row.
 
 ## When it does not work

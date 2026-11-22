@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import functools
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -70,7 +71,7 @@ def run(folder: Path, *arguments: str) -> subprocess.CompletedProcess:
 
 def listen(folder: Path, chat: str) -> subprocess.Popen:
     listener = subprocess.Popen(
-        [sys.executable, str(REPO / "vector_relay.py"), "listen", "--wait", "90", "--chat", chat], stdout=subprocess.PIPE,
+        [sys.executable, str(REPO / "vector_relay.py"), "listen", "--asked", "--wait", "90", "--chat", chat], stdout=subprocess.PIPE,
         encoding="utf-8", env={**os.environ, "VECTOR_RELAY_HOME": str(folder)},
     )
     deadline = time.time() + 10
@@ -936,6 +937,22 @@ def main() -> int:
             night.goto(address)
             expect(night.locator(".item.result").first).to_be_visible(timeout=slow)
             night.screenshot(path=str(REPO / "shots" / f"phone-dark{suffix}.png"))
+
+            # ---- a finished chat: it posted its result and nothing listens for it, then the desk holds its line
+            run(folder, "say", "--chat", atlas, "--kind", "result", "The clock test came through.")
+            expect(night.locator("#status")).to_have_text(re.compile(r"^Finished \d\d:\d\d$"), timeout=slow)
+            check(True, "status: 'Finished HH:MM' once the chat posted its result, never 'working' or 'may have stopped'")
+            (folder / "desk.pid").write_text("999999", encoding="ascii")
+            (folder / f"listening-{atlas}").write_text("999999", encoding="ascii")
+            expect(night.locator("#status")).to_have_text(re.compile(r"^Finished \d\d:\d\d · send a prompt any time$"), timeout=slow)
+            check(night.locator("#box").is_enabled(), "status: 'send a prompt any time' while the phone desk holds a finished chat, and the box takes one")
+            night.locator("#menu").tap()
+            night.locator("#showBoard").tap()
+            finished_row = night.locator("#board .row", has_text="Atlas FA")
+            expect(finished_row.locator(".state")).to_have_text(re.compile(r"^finished \d\d:\d\d · send a prompt any time$"), timeout=slow)
+            check(True, "all chats: a finished chat stays listed and is marked finished")
+            (folder / f"listening-{atlas}").unlink()
+            (folder / "desk.pid").unlink()
             dark.close()
             context.close()
             webkit.close()

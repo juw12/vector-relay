@@ -15,7 +15,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.3.4";  // the newest entry in versions.json; a test keeps the two in step
+  var APP_VERSION = "1.4.0";  // the newest entry in versions.json; a test keeps the two in step
   var KEY = "vrelay.link", PENDING = "vrelay.pending", HINT = "vrelay.hint", CHAT = "vrelay.chat";
   var HANG_MS = 10000;          // a request with no reply for this long is dropped
   var ANSWER_HOLD_S = 4;        // the relay holds the request for the answer this long (a long hold gets cut by its host)
@@ -402,7 +402,9 @@
       var nobody = active ? " No chat on " + active.name + " is in phone mode now: on that computer, type /phone in a chat." : " On the PC, type /phone in a chat.";
       return ["", "This chat left phone mode." + (others ? " Pick another one from the chat list." : nobody), false];
     }
-    if (own.listening) return ["ok", "Vector is waiting for your prompt", true];
+    if (own.listening && !own.desk) return ["ok", "Vector is waiting for your prompt", true];   // a chat he told to wait
+    if (own.done) return ["ok", "Finished " + clock(own.done) + (own.desk ? " · send a prompt any time" : ""), true];
+    if (own.desk) return ["ok", "Send a prompt any time", true];   // the desk holds a chat that went quiet
     if (last && Date.now() / 1000 - last.t > SILENT_S) return ["bad", "No word from the chat since " + clock(last.t) + ". It may have stopped: look at the PC.", true];
     return ["busy", "Vector is working" + (last ? " · last word " + ago(last.t) : ""), true];
   }
@@ -776,7 +778,11 @@
 
   function stateWords(item) {
     var row = item.row, far = typeof row.progress === "number" ? " · " + row.progress + "%" : "";
+    if (item.phone && item.phone.done && (row.state === "live" || row.state === "silent")) {   // it stays listed until Remove
+      return "finished " + moment(item.phone.done) + (item.phone.desk ? " · send a prompt any time" : "");
+    }
     if (row.state === "live") {
+      if (item.phone && item.phone.desk) return "send a prompt any time";
       if (item.phone) return (item.phone.listening ? "waiting for your prompt" : "working") + far;
       return (row.turn === "waiting" ? "waiting" : "running") + far;
     }
