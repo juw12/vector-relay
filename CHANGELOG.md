@@ -3,6 +3,15 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
+## 1.4.0 - 2026-11-22: No chat waits for the phone, and a finished chat can still be prompted ([#12](https://github.com/juw12/vector-relay/pull/12))
+
+- The phone desk (`desk.py`): one background process per computer takes the next prompt for every chat in phone mode that has finished, and has it carried out. A chat posts its result and ends its turn; it no longer sits in `listen`.
+- `listen` ends at once with `OFF` unless it is run with `--asked`, for a chat that was told to wait for the phone. The chat stays in phone mode.
+- The page says **Finished 18:40** for a chat whose last word is its result, and **Finished 18:40 · send a prompt any time** while the desk holds it. Before, it said the chat was working and, after 30 minutes, that it may have stopped.
+- All chats marks such a chat finished and keeps it in the list until Remove.
+- `status` on the computer uses the same words.
+- The skill: phone mode goes on by itself at the start of a chat that does real work, and waiting is only for a chat that was told to wait.
+
 ## 1.3.4 - 2026-11-22: Remove waits longer for a busy computer ([#9](https://github.com/juw12/vector-relay/pull/9))
 
 - Remove from the list gives a computer 20 seconds to say it removed the row, where it gave 9. A busy computer behind an office proxy took longer than 9: the page said it did not answer, and the row left a moment later all the same.

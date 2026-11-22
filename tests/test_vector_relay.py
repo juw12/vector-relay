@@ -237,6 +237,36 @@ class ChatTests(Case):
         self.assertEqual(relay.waiting_ids(self.folder), [])
         self.assertEqual(relay.read_feed(self.folder), [])
 
+    def test_listen_that_was_not_asked_for_ends_at_once_and_the_chat_stays_in_phone_mode(self) -> None:
+        chat = self.chat_on("aaaa", "Atlas FA")
+        started = time.time()
+        heard = run(self.folder, "listen", "--wait", "30", "--chat", chat)
+        self.assertEqual(heard.returncode, 3)
+        self.assertTrue(heard.stdout.startswith("OFF "), heard.stdout)
+        self.assertIn("listen --asked", heard.stdout)
+        self.assertLess(time.time() - started, 10)
+        self.assertTrue(relay.chats(self.folder)[chat]["on"])  # it is not `off`: the chat stays on the phone
+        self.assertFalse((self.folder / f"listening-{chat}").exists())
+        self.assertFalse(relay.helper_running(self.folder))
+
+    def test_the_chat_list_says_which_chat_is_finished_and_which_the_desk_holds(self) -> None:
+        done, busy, asked, quiet = self.chat_on("aaaa"), self.chat_on("bbbb"), self.chat_on("cccc"), self.chat_on("dddd")
+        relay.add_event(self.folder, "update", "reading the threads", chat=done)
+        relay.add_event(self.folder, "result", "All done.", chat=done)
+        relay.add_event(self.folder, "result", "An earlier answer.", chat=busy)
+        relay.add_event(self.folder, "update", "at work again", chat=busy)
+        relay.add_event(self.folder, "result", "An answer.", chat=asked)
+        relay.add_event(self.folder, "prompt", "and now this", source="phone", chat=asked)
+        (self.folder / "desk.pid").write_text("4242", encoding="ascii")
+        (self.folder / f"listening-{done}").write_text("4242", encoding="ascii")  # the desk holds it
+        (self.folder / f"listening-{busy}").write_text("777", encoding="ascii")   # a chat he told to wait
+        listed = {chat["id"]: chat for chat in relay.chat_list(self.folder)}
+        self.assertGreater(listed[done]["done"], 0)
+        self.assertEqual((listed[done]["desk"], listed[done]["listening"]), (True, True))
+        self.assertEqual((listed[busy]["done"], listed[busy]["desk"], listed[busy]["listening"]), (0, False, True))
+        self.assertEqual((listed[asked]["done"], listed[asked]["desk"], listed[asked]["listening"]), (0, False, False))
+        self.assertEqual((listed[quiet]["done"], listed[quiet]["desk"]), (0, False))
+
     def test_the_feed_answer_lists_the_chats(self) -> None:
         self.chat_on("aaaa", "Atlas FA")
         self.chat_on("bbbb", "Weekly")
@@ -693,7 +723,7 @@ class CommandTests(Case):
         on = run(self.folder, "on")
         self.assertEqual(on.returncode, 2)
         self.assertIn("vector_relay.py pair --open", on.stdout)
-        self.assertEqual(run(self.folder, "listen", "--wait", "1").returncode, 3)
+        self.assertEqual(run(self.folder, "listen", "--asked", "--wait", "1").returncode, 3)
 
     def test_a_python_without_the_packages_hands_the_command_to_one_that_has_them(self) -> None:
         bare = [sys.executable, "-S", str(REPO / "vector_relay.py")]  # -S: this Python sees no installed packages
@@ -769,7 +799,7 @@ class TripTests(Case):
         self.assertFalse(feed["listening"])
 
         listener = subprocess.Popen(
-            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--wait", "40"], stdout=subprocess.PIPE, encoding="utf-8",
+            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--asked", "--wait", "40"], stdout=subprocess.PIPE, encoding="utf-8",
             env={**os.environ, "VECTOR_RELAY_HOME": str(self.folder)},
         )
         deadline = time.time() + 10
@@ -807,7 +837,7 @@ class TripTests(Case):
         self.assertIn("--chat", several.stdout)
         listeners = [
             subprocess.Popen(
-                [sys.executable, str(REPO / "vector_relay.py"), "listen", "--wait", "40", "--chat", chat], stdout=subprocess.PIPE,
+                [sys.executable, str(REPO / "vector_relay.py"), "listen", "--asked", "--wait", "40", "--chat", chat], stdout=subprocess.PIPE,
                 encoding="utf-8", env={**os.environ, "VECTOR_RELAY_HOME": str(self.folder)},
             ) for chat in chats
         ]
@@ -859,7 +889,7 @@ class TripTests(Case):
     def test_listen_ends_when_its_chat_is_removed_from_the_page(self) -> None:
         chat = run(self.folder, "on", "--label", "Atlas FA").stdout.split("chat=")[1][:4]
         listener = subprocess.Popen(
-            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--chat", chat], stdout=subprocess.PIPE, encoding="utf-8",
+            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--asked", "--chat", chat], stdout=subprocess.PIPE, encoding="utf-8",
             env={**os.environ, "VECTOR_RELAY_HOME": str(self.folder)},
         )
         time.sleep(1)
@@ -891,7 +921,7 @@ class TripTests(Case):
     def test_listen_ends_when_phone_mode_goes_off(self) -> None:
         run(self.folder, "on")
         listener = subprocess.Popen(
-            [sys.executable, str(REPO / "vector_relay.py"), "listen"], stdout=subprocess.PIPE, encoding="utf-8",
+            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--asked"], stdout=subprocess.PIPE, encoding="utf-8",
             env={**os.environ, "VECTOR_RELAY_HOME": str(self.folder)},
         )
         time.sleep(1)
@@ -902,7 +932,7 @@ class TripTests(Case):
 
     def test_a_listener_left_behind_gives_way_to_a_new_one(self) -> None:
         chat = run(self.folder, "on").stdout.split("chat=")[1][:4]
-        command = [sys.executable, str(REPO / "vector_relay.py"), "listen", "--wait", "40", "--chat", chat]
+        command = [sys.executable, str(REPO / "vector_relay.py"), "listen", "--asked", "--wait", "40", "--chat", chat]
         options = {"stdout": subprocess.PIPE, "encoding": "utf-8", "env": {**os.environ, "VECTOR_RELAY_HOME": str(self.folder)}}
         old = subprocess.Popen(command, **options)
         deadline = time.time() + 10
@@ -1185,7 +1215,7 @@ class LocalTests(Case):
         self.assertLess(time.time() - started, 2)
         self.assertEqual([(entry["id"], entry["label"], entry["on"]) for entry in feed["chats"]], [(chat, "Local", True)])
         listener = subprocess.Popen(
-            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--wait", "30", "--chat", chat], stdout=subprocess.PIPE,
+            [sys.executable, str(REPO / "vector_relay.py"), "listen", "--asked", "--wait", "30", "--chat", chat], stdout=subprocess.PIPE,
             encoding="utf-8", env={**os.environ, "VECTOR_RELAY_HOME": str(self.folder)},
         )
         deadline = time.time() + 10

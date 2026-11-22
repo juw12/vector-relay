@@ -64,7 +64,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.4"
+VERSION = "1.4.0"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -291,11 +291,33 @@ def listening(folder: Path, chat: str = "") -> bool:
     return False
 
 
+def desk_holds(folder: Path, chat: str) -> bool:
+    """True while the phone desk, not the chat itself, holds this chat's line."""
+    try:
+        desk = (folder / "desk.pid").read_text(encoding="ascii").strip()
+        return bool(desk) and listening(folder, chat) and (folder / f"listening-{chat}").read_text(encoding="ascii") == desk
+    except OSError:
+        return False
+
+
+def finished_at(events: list[dict], chat: str) -> int:
+    """When the chat posted its result (or its error), if that is the last thing this computer posted for it. Else 0."""
+    for event in reversed(events):
+        if event.get("chat") != chat:
+            continue
+        if event.get("from", "pc") != "pc":
+            return 0  # he sent a prompt after it: that is being carried out, or waits for the desk
+        return int(event.get("t", 0)) if event.get("kind") in ("result", "error") else 0
+    return 0
+
+
 def chat_list(folder: Path) -> list[dict]:
     """What the phone shows as chats: those in phone mode, and those that left it within a day."""
     now = time.time()
+    events = read_feed(folder)
     return [
-        {"id": chat, "label": entry["label"], "on": entry["on"], "since": entry["since"], "listening": listening(folder, chat)}
+        {"id": chat, "label": entry["label"], "on": entry["on"], "since": entry["since"], "listening": listening(folder, chat),
+         "desk": desk_holds(folder, chat), "done": finished_at(events, chat)}
         for chat, entry in chats(folder).items() if entry["on"] or now - entry["since"] < CHAT_KEPT_S
     ]
 
@@ -1695,7 +1717,14 @@ def command_say(folder: Path, kind: str, words: list[str], file: str, image: str
     return 0
 
 
-def command_listen(folder: Path, wait: float, named: str) -> int:
+NOT_ASKED = ("OFF waiting is not the default: this chat stays in phone mode and ends its turn; the phone desk "
+             "takes his next prompt. Wait only when he said so, with:  listen --asked")
+
+
+def command_listen(folder: Path, wait: float, named: str, asked: bool = True) -> int:
+    if not asked and os.environ.get("VECTOR_RELAY_WAIT") != "1":
+        print(NOT_ASKED)  # the chat is left in phone mode: this is not `off`
+        return 3
     chat, why = pick_chat(folder, named)
     if why == "several":
         print("OFF " + SEVERAL)
@@ -1890,7 +1919,16 @@ def command_status(folder: Path) -> int:
     print(f"Phone mode: {'on in ' + str(len(on)) + ' chat(s)' if on else 'off'}")
     for chat, entry in chats(folder).items():
         if entry["on"]:
-            state = "waiting for a prompt" if listening(folder, chat) else "working (not listening right now)"
+            done, held = finished_at(events, chat), desk_holds(folder, chat)
+            at = time.strftime("%H:%M", time.localtime(done)) if done else ""
+            if listening(folder, chat) and not held:
+                state = "waiting for a prompt"
+            elif done:
+                state = f"finished {at}, " + ("send a prompt any time" if held else "no desk runs to take a prompt")
+            elif held:
+                state = "silent, send a prompt any time"
+            else:
+                state = "working"
             print(f"  {chat}  {entry['label'] or '(no name)'}: {state}, {len(waiting_ids(folder, chat))} prompt(s) waiting")
     print(f"Helper:     {'running' if running else 'not running'}")
     if running and helper.get("contact"):
@@ -2020,7 +2058,9 @@ def main(arguments: list[str] | None = None) -> int:
     say.add_argument("--image", default="", help="a picture to show on the phone (PNG, JPEG, ...)")
     say.add_argument("--chat", default="", help="which chat, when several are on")
     say.add_argument("words", nargs="*")
-    listen = commands.add_parser("listen", help="wait for the next prompt from the phone")
+    listen = commands.add_parser("listen", help="wait for the next prompt from the phone (only with --asked)")
+    listen.add_argument("--asked", action="store_true",
+                        help="he told this chat to wait for his phone; without it listen ends at once with OFF")
     listen.add_argument("--wait", type=float, default=0, help="seconds to wait; 0 waits until one comes")
     listen.add_argument("--chat", default="", help="which chat, when several are on")
     step = commands.add_parser("step", help="say what a chat is doing, on the board of every chat")
@@ -2066,7 +2106,7 @@ def main(arguments: list[str] | None = None) -> int:
     if chosen.command == "say":
         return command_say(folder, chosen.kind, chosen.words, chosen.file, chosen.image, chosen.chat)
     if chosen.command == "listen":
-        return command_listen(folder, chosen.wait, chosen.chat)
+        return command_listen(folder, chosen.wait, chosen.chat, chosen.asked)
     if chosen.command == "step":
         return command_step(folder, chosen.words, chosen.chat, chosen.title, chosen.agent, chosen.progress, chosen.end)
     if chosen.command == "board":
