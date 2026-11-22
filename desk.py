@@ -119,6 +119,16 @@ def log(folder: Path, text: str) -> None:
 def alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":  # os.kill(pid, 0) ENDS a process on Windows: ask for its exit code instead
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        answered = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return bool(answered) and code.value == 259  # STILL_ACTIVE
     try:
         os.kill(pid, 0)
     except PermissionError:
