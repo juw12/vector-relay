@@ -132,6 +132,10 @@ The phone desk is that listener instead: one background process per computer.
   The agent runs with its permissions approved (`--auto`), under the same rules a chat in phone
   mode follows (no mail or messages to others, payments, final submits, deleting, publishing or
   pushing unless that prompt says so plainly). `desk.py remove` switches all of it off.
+- **Which computer, which app.** With Cairn's command named in `desk.json` (`"cairn": [...]`), the desk asks Cairn for
+  every prompt (`cairn vibe hand phone`; chosen on Cairn's Vibe page, Chats' work, Prompts from the phone). This
+  computer with OpenCode or Claude Code, or another computer: the prompt goes there as a Cairn handoff, Cairn there
+  starts the app, and the answer comes back to the phone under the same chat.
 - Settings, all optional: `desk.json` in the data folder, `{"agent": "", "model": "",
   "minutes_per_prompt": 45, "at_once": 2, "work_folder": "", "silent_minutes": 30}`. Log: `desk.log` there.
 

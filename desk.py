@@ -19,9 +19,15 @@ A chat is finished when the last thing the computer posted for it is a result, a
 note, or when it has posted nothing for SILENT_S. The desk lets go of a chat the moment that chat
 posts an update again, and of a chat that another listener (a chat told to wait) takes over.
 
+Which computer carries a prompt out, and which app, is chosen in Cairn (Vibe, Chats' work, Prompts
+from the phone) when desk.json names Cairn's command: the desk asks `cairn vibe hand phone` for every
+prompt. This computer with OpenCode is what it does without Cairn. Another computer: the prompt goes
+there as a Cairn handoff (`cairn handoff ask`), Cairn there starts the app, and the answer comes back.
+
 Settings: desk.json in the relay's data folder, every key optional:
     {"agent": "~/.opencode/bin/opencode", "model": "", "minutes_per_prompt": 45,
-     "at_once": 2, "work_folder": "", "silent_minutes": 30}
+     "at_once": 2, "work_folder": "", "silent_minutes": 30,
+     "cairn": ["python3", "-m", "cairn", "--root", "<the brain>", "--brain", "."], "cairn_env": {"PYTHONPATH": "<Cairn's clone>"}}
 """
 
 from __future__ import annotations
@@ -51,6 +57,8 @@ CONTEXT_EVENTS, CONTEXT_EVENT_TEXT, CONTEXT_TEXT = 14, 1_800, 14_000  # what the
 ANSWER_TEXT = 20_000  # a longer answer is cut for the phone
 DEFAULTS = {"agent": "", "model": "", "minutes_per_prompt": 45, "at_once": 2, "work_folder": "", "silent_minutes": 30}
 BUSY_KINDS = ("update", "prompt")  # the chat itself is at work after one of these
+APPS = {"opencode": "OpenCode", "claude": "Claude Code"}  # what Cairn can choose for a prompt from the phone
+PHONE_LINE = re.compile(r"^PHONE to=(.*) agent=([a-z]+)[ \t]*$", re.M)  # what `cairn vibe hand phone` prints
 
 RULES = """\
 You carry out a prompt that the owner of this computer sent from his phone through Vector Relay.
@@ -211,6 +219,92 @@ def told(feed: list[dict], chat: str, label: str, prompt: dict, after: int) -> s
     )
 
 
+# ---------------------------------------------------------------- where Cairn sends a prompt
+def cairn_command(kept: dict) -> list[str]:
+    named = kept.get("cairn")
+    return [str(word) for word in named] if isinstance(named, list) and named else []
+
+
+def cairn_environment(kept: dict) -> dict:
+    more = kept.get("cairn_env") if isinstance(kept.get("cairn_env"), dict) else {}
+    return {**os.environ, **{str(name): str(value) for name, value in more.items()}}
+
+
+def route(kept: dict) -> tuple[str, str]:
+    """(the computer that carries a prompt out, "" for this one; the app), as chosen in Cairn.
+    This computer and OpenCode when Cairn is not named in the settings or does not answer."""
+    command = cairn_command(kept)
+    if not command:
+        return "", "opencode"
+    try:
+        done = subprocess.run([*command, "vibe", "hand", "phone"], capture_output=True, encoding="utf-8", errors="replace",
+                              timeout=60, env=cairn_environment(kept), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return "", "opencode"
+    found = PHONE_LINE.search(done.stdout or "")
+    if not found or found.group(2) not in APPS:
+        return "", "opencode"
+    to = found.group(1).strip()
+    return ("" if to == "here" else to), found.group(2)
+
+
+def carry_out_plainly(folder: Path, chat: str, label: str, prompt: dict, kept: dict, stop: threading.Event,
+                      to: str, app: str) -> None:
+    """A prompt for another computer (through Cairn), or for an app here that prints its answer as plain text."""
+    feed = relay.read_feed(folder)
+    message = told(feed, chat, label, prompt, 0)
+    minutes = kept["minutes_per_prompt"]
+    if to:
+        asked = folder / f"desk-ask-{chat}.md"
+        asked.write_text(message, encoding="utf-8")
+        command = [*cairn_command(kept), "handoff", "ask", f"Phone prompt: {label or chat}", "--to", to, "--agent", app,
+                   "--wait", str(minutes), "--file", str(asked)]
+        where, limit = folder, minutes * 60 + 300
+        say(folder, chat, "update", f"Sent to {to}: Cairn there starts {APPS[app]} on it. {to} has to be on, with Cairn running.")
+    else:
+        program = shutil.which("claude") or shutil.which(str(Path("~/.local/bin/claude").expanduser()))
+        if not program:
+            say(folder, chat, "error", f"{APPS[app]} was chosen in Cairn for prompts from the phone, but it is not installed on this computer.")
+            return
+        command, where, limit = [program, "-p", message], work_folder(feed, chat, kept, folder), minutes * 60
+    log(folder, f"{chat}: prompt {prompt.get('id', '')} -> {APPS[app]} on {to or 'this computer'}")
+    started = time.time()
+    try:
+        child = subprocess.Popen(command, cwd=str(where), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 encoding="utf-8", errors="replace", start_new_session=True, env=cairn_environment(kept))
+    except OSError as problem:
+        say(folder, chat, "error", f"The phone desk could not start {'Cairn' if to else APPS[app]}: {problem}")
+        return
+    late = False
+
+    def watch() -> None:
+        nonlocal late
+        while child.poll() is None:
+            if stop.is_set() or time.time() - started > limit:
+                late = not stop.is_set()
+                try:
+                    os.killpg(child.pid, signal.SIGTERM) if hasattr(os, "killpg") else child.terminate()
+                except OSError:
+                    pass
+                return
+            time.sleep(1)
+
+    threading.Thread(target=watch, daemon=True).start()
+    output, errors = child.communicate()
+    answer = (output or "").strip()
+    who = f"{APPS[app]} on {to}" if to else APPS[app]
+    if stop.is_set():
+        say(folder, chat, "error", "The phone desk was stopped while it worked on this prompt. Send it again when the desk is back.")
+    elif late:
+        say(folder, chat, "error", f"Stopped after {minutes} minutes, the limit for one prompt ({who}).")
+    elif child.returncode == 0 and answer:
+        say(folder, chat, "result", answer[:ANSWER_TEXT])
+    else:
+        why = answer or (errors or "").strip()[-600:] or f"it ended with code {child.returncode} and no answer"
+        say(folder, chat, "error", f"{who} did not carry this out: {why[:ANSWER_TEXT]}")
+    log(folder, f"{chat}: prompt {prompt.get('id', '')} done by {who} in {(time.time() - started) / 60:.1f} min, code {child.returncode}")
+
+
 # ---------------------------------------------------------------- one prompt, carried out
 def say(folder: Path, chat: str, kind: str, text: str) -> None:
     """Posts to the phone under the chat's id, exactly as the chat's own `say` does."""
@@ -235,6 +329,9 @@ def doing(part: dict) -> str:
 
 def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, stop: threading.Event) -> None:
     """Runs the agent on one prompt and posts what it says under the chat's id."""
+    to, app = route(kept)
+    if to or app != "opencode":
+        return carry_out_plainly(folder, chat, label, prompt, kept, stop, to, app)
     program = agent_program(kept)
     if not program:
         say(folder, chat, "error", "The phone desk has no agent to run: OpenCode was not found on this computer. "

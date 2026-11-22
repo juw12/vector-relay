@@ -215,6 +215,60 @@ class CarriedOut(DeskCase):
         self.assertIn("was stopped while it worked", self.said(chat, "error")[-1])
 
 
+class ChosenInCairn(DeskCase):
+    """Cairn says which computer carries a prompt out, and which app."""
+
+    def cairn(self, line: str) -> None:
+        kept = relay.read_json(self.folder / "desk.json", {})
+        kept.update(cairn=[sys.executable, str(REPO / "tests" / "fake_cairn.py")], cairn_env={"FAKE_CAIRN_PHONE": line})
+        relay.write_json(self.folder / "desk.json", kept)
+
+    def test_without_cairn_it_is_this_computer_and_opencode(self) -> None:
+        self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("", "opencode"))
+
+    def test_the_route_is_read_from_cairn(self) -> None:
+        self.cairn("PHONE to=ASUS EXPERTBOOK P5405CSA agent=claude")
+        self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("ASUS EXPERTBOOK P5405CSA", "claude"))
+        self.cairn("PHONE to=here agent=opencode")
+        self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("", "opencode"))
+        self.cairn("something else")
+        self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("", "opencode"))
+
+    def test_here_with_opencode_runs_the_agent_as_before(self) -> None:
+        self.cairn("PHONE to=here agent=opencode")
+        chat = self.chat("here", ("result", "Done."))
+        relay.put_prompt(self.folder, chat, "p1", "still local")
+        self.look()
+        self.assertIn("session=ses_fake1", self.said(chat, "result")[-1])
+
+    def test_a_prompt_for_another_computer_goes_through_cairn_and_comes_back(self) -> None:
+        self.cairn("PHONE to=ASUS EXPERTBOOK P5405CSA agent=opencode")
+        chat = self.chat("away", ("result", "Done here."))
+        relay.put_prompt(self.folder, chat, "p1", "do it over there")
+        self.look()
+        self.assertEqual(self.said(chat, "result")[-1],
+                         "from=ASUS EXPERTBOOK P5405CSA app=opencode title=Phone prompt: Chat away last=do it over there")
+        self.assertIn("Sent to ASUS EXPERTBOOK P5405CSA: Cairn there starts OpenCode on it", self.said(chat, "update")[-1])
+
+    def test_another_computer_that_does_not_answer_is_an_error_with_its_reason(self) -> None:
+        self.cairn("PHONE to=ASUS EXPERTBOOK P5405CSA agent=opencode")
+        chat = self.chat("late", ("result", "Done here."))
+        relay.put_prompt(self.folder, chat, "p1", "SLOW please")
+        self.look()
+        self.assertEqual(self.said(chat, "result"), ["Done here."])
+        self.assertIn("OpenCode on ASUS EXPERTBOOK P5405CSA did not carry this out: ASUS EXPERTBOOK P5405CSA has not answered", self.said(chat, "error")[-1])
+
+    def test_an_app_that_is_not_installed_here_is_said(self) -> None:
+        self.cairn("PHONE to=here agent=claude")
+        chat = self.chat("clau", ("result", "Done."))
+        relay.put_prompt(self.folder, chat, "p1", "hello")
+        original = desk.shutil.which
+        desk.shutil.which = lambda name, *more: None if "claude" in str(name) else original(name, *more)
+        self.addCleanup(setattr, desk.shutil, "which", original)
+        self.look()
+        self.assertIn("Claude Code was chosen in Cairn for prompts from the phone, but it is not installed", self.said(chat, "error")[-1])
+
+
 class Commands(DeskCase):
     def test_status_and_feed_run(self) -> None:
         chat = self.chat("stat", ("result", "Done."))
