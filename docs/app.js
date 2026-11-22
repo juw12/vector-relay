@@ -15,7 +15,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.4.1";  // the newest entry in versions.json; a test keeps the two in step
+  var APP_VERSION = "1.4.2";  // the newest entry in versions.json; a test keeps the two in step
   var KEY = "vrelay.link", PENDING = "vrelay.pending", HINT = "vrelay.hint", CHAT = "vrelay.chat";
   var HANG_MS = 10000;          // a request with no reply for this long is dropped
   var ANSWER_HOLD_S = 4;        // the relay holds the request for the answer this long (a long hold gets cut by its host)
