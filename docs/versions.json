@@ -4,7 +4,7 @@
     {
       "version": "1.4.0",
       "date": "2026-11-22",
-      "pr": 12,
+      "pr": 13,
       "title": "No chat waits for the phone, and a finished chat can still be prompted",
       "changes": [
         "The phone desk (`desk.py`): one background process per computer takes the next prompt for every chat in phone mode that has finished, and has it carried out. A chat posts its result and ends its turn; it no longer sits in `listen`.",

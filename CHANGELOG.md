@@ -3,7 +3,7 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
-## 1.4.0 - 2026-11-22: No chat waits for the phone, and a finished chat can still be prompted ([#12](https://github.com/juw12/vector-relay/pull/12))
+## 1.4.0 - 2026-11-22: No chat waits for the phone, and a finished chat can still be prompted ([#13](https://github.com/juw12/vector-relay/pull/13))
 
 - The phone desk (`desk.py`): one background process per computer takes the next prompt for every chat in phone mode that has finished, and has it carried out. A chat posts its result and ends its turn; it no longer sits in `listen`.
 - `listen` ends at once with `OFF` unless it is run with `--asked`, for a chat that was told to wait for the phone. The chat stays in phone mode.
