@@ -227,8 +227,10 @@ class ChosenInCairn(DeskCase):
         self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("", "opencode"))
 
     def test_the_route_is_read_from_cairn(self) -> None:
-        self.cairn("PHONE to=ASUS EXPERTBOOK P5405CSA agent=claude")
-        self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("ASUS EXPERTBOOK P5405CSA", "claude"))
+        self.cairn("PHONE to=ASUS EXPERTBOOK P5405CSA agent=opencode")
+        self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("ASUS EXPERTBOOK P5405CSA", "opencode"))
+        self.cairn("PHONE to=ASUS EXPERTBOOK P5405CSA agent=claude")  # an app the desk does not know: nothing is sent away
+        self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("", "opencode"))
         self.cairn("PHONE to=here agent=opencode")
         self.assertEqual(desk.route(desk.desk_settings(self.folder)), ("", "opencode"))
         self.cairn("something else")
@@ -257,16 +259,6 @@ class ChosenInCairn(DeskCase):
         self.look()
         self.assertEqual(self.said(chat, "result"), ["Done here."])
         self.assertIn("OpenCode on ASUS EXPERTBOOK P5405CSA did not carry this out: ASUS EXPERTBOOK P5405CSA has not answered", self.said(chat, "error")[-1])
-
-    def test_an_app_that_is_not_installed_here_is_said(self) -> None:
-        self.cairn("PHONE to=here agent=claude")
-        chat = self.chat("clau", ("result", "Done."))
-        relay.put_prompt(self.folder, chat, "p1", "hello")
-        original = desk.shutil.which
-        desk.shutil.which = lambda name, *more: None if "claude" in str(name) else original(name, *more)
-        self.addCleanup(setattr, desk.shutil, "which", original)
-        self.look()
-        self.assertIn("Claude Code was chosen in Cairn for prompts from the phone, but it is not installed", self.said(chat, "error")[-1])
 
 
 class Commands(DeskCase):

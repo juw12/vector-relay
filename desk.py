@@ -57,7 +57,7 @@ CONTEXT_EVENTS, CONTEXT_EVENT_TEXT, CONTEXT_TEXT = 14, 1_800, 14_000  # what the
 ANSWER_TEXT = 20_000  # a longer answer is cut for the phone
 DEFAULTS = {"agent": "", "model": "", "minutes_per_prompt": 45, "at_once": 2, "work_folder": "", "silent_minutes": 30}
 BUSY_KINDS = ("update", "prompt")  # the chat itself is at work after one of these
-APPS = {"opencode": "OpenCode", "claude": "Claude Code"}  # what Cairn can choose for a prompt from the phone
+APPS = {"opencode": "OpenCode"}  # what Cairn can choose for a prompt from the phone
 PHONE_LINE = re.compile(r"^PHONE to=(.*) agent=([a-z]+)[ \t]*$", re.M)  # what `cairn vibe hand phone` prints
 
 RULES = """\
@@ -260,30 +260,23 @@ def route(kept: dict) -> tuple[str, str]:
 
 def carry_out_plainly(folder: Path, chat: str, label: str, prompt: dict, kept: dict, stop: threading.Event,
                       to: str, app: str) -> None:
-    """A prompt for another computer (through Cairn), or for an app here that prints its answer as plain text."""
+    """A prompt for another computer, through Cairn: it is left there, Cairn there starts the app, the answer comes back."""
     feed = relay.read_feed(folder)
     message = told(feed, chat, label, prompt, 0)
     minutes = kept["minutes_per_prompt"]
-    if to:
-        asked = folder / f"desk-ask-{chat}.md"
-        asked.write_text(message, encoding="utf-8")
-        command = [*cairn_command(kept), "handoff", "ask", f"Phone prompt: {label or chat}", "--to", to, "--agent", app,
-                   "--wait", str(minutes), "--file", str(asked)]
-        where, limit = folder, minutes * 60 + 300
-        say(folder, chat, "update", f"Sent to {to}: Cairn there starts {APPS[app]} on it. {to} has to be on, with Cairn running.")
-    else:
-        program = shutil.which("claude") or shutil.which(str(Path("~/.local/bin/claude").expanduser()))
-        if not program:
-            say(folder, chat, "error", f"{APPS[app]} was chosen in Cairn for prompts from the phone, but it is not installed on this computer.")
-            return
-        command, where, limit = [program, "-p", message], work_folder(feed, chat, kept, folder), minutes * 60
+    asked = folder / f"desk-ask-{chat}.md"
+    asked.write_text(message, encoding="utf-8")
+    command = [*cairn_command(kept), "handoff", "ask", f"Phone prompt: {label or chat}", "--to", to, "--agent", app,
+               "--wait", str(minutes), "--file", str(asked)]
+    where, limit = folder, minutes * 60 + 300
+    say(folder, chat, "update", f"Sent to {to}: Cairn there starts {APPS[app]} on it. {to} has to be on, with Cairn running.")
     log(folder, f"{chat}: prompt {prompt.get('id', '')} -> {APPS[app]} on {to or 'this computer'}")
     started = time.time()
     try:
         child = subprocess.Popen(command, cwd=str(where), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  encoding="utf-8", errors="replace", start_new_session=True, env=cairn_environment(kept))
     except OSError as problem:
-        say(folder, chat, "error", f"The phone desk could not start {'Cairn' if to else APPS[app]}: {problem}")
+        say(folder, chat, "error", f"The phone desk could not start Cairn: {problem}")
         return
     late = False
 
@@ -302,7 +295,7 @@ def carry_out_plainly(folder: Path, chat: str, label: str, prompt: dict, kept: d
     threading.Thread(target=watch, daemon=True).start()
     output, errors = child.communicate()
     answer = (output or "").strip()
-    who = f"{APPS[app]} on {to}" if to else APPS[app]
+    who = f"{APPS[app]} on {to}"
     if stop.is_set():
         say(folder, chat, "error", "The phone desk was stopped while it worked on this prompt. Send it again when the desk is back.")
     elif late:
@@ -340,7 +333,7 @@ def doing(part: dict) -> str:
 def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, stop: threading.Event) -> None:
     """Runs the agent on one prompt and posts what it says under the chat's id."""
     to, app = route(kept)
-    if to or app != "opencode":
+    if to:
         return carry_out_plainly(folder, chat, label, prompt, kept, stop, to, app)
     program = agent_program(kept)
     if not program:
