@@ -105,6 +105,36 @@ and the foot of the list says when each computer was last heard.
 - A computer with a Vector Relay from before 1.3.0 shows only its chats in phone mode, and the
   foot of the list says so.
 
+## The phone desk: prompt a finished chat, and no chat waits
+
+A chat can be prompted from the phone only while something on the computer listens for it. A
+chat that does this itself has to sit in `listen`, and its app then shows it as still running.
+The phone desk is that listener instead: one background process per computer.
+
+    python desk.py install      start it now and at every login (macOS; on Windows a Scheduled Task that runs `desk.py run`)
+    python desk.py status       is it running, which chats it holds, what it works on
+    python desk.py remove       stop it
+    python desk.py feed --chat <id>   what was said in one chat, the desk's work included
+
+- A chat does `on`, `say` at its milestones, `say --kind result`, and ends. No `listen`, no `off`:
+  it stays on the phone until you remove it.
+- The desk holds the line of every chat in phone mode that is finished: the last thing the
+  computer posted for it is a result, an error or a note, or it has said nothing for 30 minutes.
+  It lets go the moment the chat posts an update again, and it never takes the line of a chat
+  that sits in `listen` itself.
+- A prompt you send to such a chat is carried out by an agent the desk starts without a window
+  (OpenCode: `opencode run --auto --format json`), in the folder that chat's own words name most.
+  It is told what the chat said so far, then your prompt. Its steps and its answer are posted
+  under the same chat id. The next prompt goes on in the same OpenCode session.
+- A prompt for a chat that is still at work waits and is taken when that chat posts its result.
+- **What to know.** The answer comes from that agent and its model, not from the chat app's own
+  chat, and it does not appear in the chat app's window: a chat reads it with `desk.py feed`.
+  The agent runs with its permissions approved (`--auto`), under the same rules a chat in phone
+  mode follows (no mail or messages to others, payments, final submits, deleting, publishing or
+  pushing unless that prompt says so plainly). `desk.py remove` switches all of it off.
+- Settings, all optional: `desk.json` in the data folder, `{"agent": "", "model": "",
+  "minutes_per_prompt": 45, "at_once": 2, "work_folder": "", "silent_minutes": 30}`. Log: `desk.log` there.
+
 ## Set it up (once)
 
 1. Python 3.10 or newer, then `pip install cryptography segno pillow`.
@@ -250,6 +280,7 @@ the chat list); `CHANGELOG.md` and the lines below are made from it by
 | Path | What |
 |---|---|
 | `vector_relay.py` | The PC side, one file. |
+| `desk.py` | The phone desk: finished chats are prompted from the phone, and no chat waits. |
 | `docs/` | The phone page. |
 | `functions/c/[[path]].js`, `schema.sql`, `wrangler.toml` | The relay: a Pages Function and its D1 database. |
 | `skill/phone-relay/SKILL.md` | The `/phone` skill for the chat's agent, with the steps for All chats. |
