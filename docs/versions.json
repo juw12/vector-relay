@@ -2,6 +2,15 @@
   "note": "The one list of versions. The phone page shows it under Version history; CHANGELOG.md and the Versions part of the README are made from it by scripts/make_changelog.py.",
   "releases": [
     {
+      "version": "1.4.1",
+      "date": "2026-11-22",
+      "pr": 15,
+      "title": "The phone desk installs on Windows",
+      "changes": [
+        "`desk.py install` works on Windows: the desk starts at every logon (this user's Run key, no administrator needed) and now, without a console window and outside the job that started it. `desk.py remove` takes the logon item away."
+      ]
+    },
+    {
       "version": "1.4.0",
       "date": "2026-11-22",
       "pr": 13,

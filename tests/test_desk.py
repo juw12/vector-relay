@@ -11,8 +11,10 @@ import stat
 import sys
 import tempfile
 import threading
+import types
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -267,6 +269,45 @@ class Commands(DeskCase):
         self.assertEqual(desk.command_status(self.folder), 0)
         self.assertEqual(desk.command_feed(self.folder, chat, 5), 0)
         self.assertEqual(desk.command_feed(self.folder, "zzzz", 5), 2)
+
+    def test_install_on_windows_writes_the_logon_item_and_starts_the_desk_outside_the_job(self) -> None:
+        """Windows cannot be run here: its registry and its process start are stood in for."""
+        written, started = {}, []
+
+        class Key:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *ignored):
+                return False
+
+        registry = types.SimpleNamespace(
+            HKEY_CURRENT_USER="HKCU", REG_SZ=1, KEY_SET_VALUE=2,
+            CreateKey=lambda root, path: Key(), OpenKey=lambda root, path, reserved, access: Key(),
+            SetValueEx=lambda key, name, reserved, kind, value: written.update({name: value}),
+            DeleteValue=lambda key, name: written.pop(name),
+        )
+
+        def start(command, **options):
+            started.append((command, options))
+            (self.folder / "desk.pid").write_text(str(os.getpid()), encoding="ascii")  # a desk that came up
+
+        environment = {name: value for name, value in os.environ.items() if name != "VECTOR_RELAY_HOME"}
+        environment["RUNNER_TRACKING_ID"] = "github_job_1"
+        with mock.patch.dict(sys.modules, {"winreg": registry}), mock.patch.object(desk, "on_windows", return_value=True), \
+                mock.patch.object(desk.subprocess, "Popen", side_effect=start), mock.patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(desk.command_install(self.folder), 0)
+            command = written[desk.RUN_NAME]
+            self.assertTrue(command.endswith(" run") and "desk.py" in command, command)
+            self.assertEqual(len(started), 1)
+            self.assertEqual(started[0][0][-1], "run")
+            self.assertNotIn("RUNNER_TRACKING_ID", started[0][1]["env"], "or the runner ends the desk with its job")
+            self.assertEqual(started[0][1]["env"]["VECTOR_RELAY_HOME"], str(self.folder))
+            self.assertEqual(desk.command_install(self.folder), 0)
+            self.assertEqual(len(started), 1, "a desk that runs is not started a second time")
+            with mock.patch.object(desk.os, "kill"):
+                self.assertEqual(desk.command_remove(self.folder), 0)
+            self.assertNotIn(desk.RUN_NAME, written)
 
     def test_a_tool_is_one_plain_line(self) -> None:
         self.assertEqual(desk.doing({"tool": "shell", "state": {"title": "shell", "input": {"command": "ls  -1"}}}), "shell: ls -1")

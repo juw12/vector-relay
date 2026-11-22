@@ -10,7 +10,7 @@ holds the line for every chat in phone mode that has finished its reply. The cha
     phone <--result-- relay <-- helper <-- feed  <-- desk <--
 
     desk.py run                 the desk, in this window (the login item runs this)
-    desk.py install             start it now and at every login (macOS: a launch agent)
+    desk.py install             start it now and at every login (macOS: a launch agent; Windows: the user's Run key)
     desk.py remove              stop it and take the login item away
     desk.py status              is it running, which chats it holds, what it is working on
     desk.py feed --chat <id>    what was said in one chat, the desk's work included
@@ -510,9 +510,56 @@ def launch_agent() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"  # this user's own logon items: no administrator needed
+RUN_NAME = "VectorRelayDesk"
+
+
+def on_windows() -> bool:
+    return os.name == "nt"
+
+
+def windowless_python() -> str:
+    """pythonw.exe beside this Python when there is one: the desk must not open a console window."""
+    quiet = Path(sys.executable).with_name("pythonw.exe")
+    return str(quiet if quiet.exists() else sys.executable)
+
+
+def install_on_windows(folder: Path) -> int:
+    """The desk at every logon (the user's Run key) and now, in a process of its own."""
+    import winreg
+
+    command = [windowless_python(), str(Path(__file__).resolve()), "run"]
+    own_folder = bool(os.environ.get("VECTOR_RELAY_HOME"))
+    if own_folder:  # a Run entry carries no environment: it would open the usual data folder, not this one
+        print("VECTOR_RELAY_HOME is set, so no logon item was written: the desk is started for this folder now only.")
+    else:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, subprocess.list2cmdline(command))
+    if not desk_pid(folder):
+        # as the helper is started: no console, its own group, normal priority, outside the job that ran this
+        options = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(folder),
+                   "env": {name: value for name, value in {**os.environ, "VECTOR_RELAY_HOME": str(folder)}.items()
+                           if name != "RUNNER_TRACKING_ID"}}  # a runner ends every process that carries its job's id
+        flags = 0x00000008 | 0x00000200 | 0x00000020
+        try:
+            subprocess.Popen(command, creationflags=flags | 0x01000000, **options)
+        except OSError:
+            subprocess.Popen(command, creationflags=flags, **options)
+    for attempt in range(60):
+        if desk_pid(folder):
+            break
+        time.sleep(0.25)
+    pid = desk_pid(folder)
+    print(f"The phone desk {'runs now, pid ' + str(pid) if pid else 'did NOT start'}"
+          + ("" if own_folder else f", and starts at every logon (Run key {RUN_NAME})") + ".")
+    return 0 if pid else 1
+
+
 def command_install(folder: Path) -> int:
+    if on_windows():
+        return install_on_windows(folder)
     if sys.platform != "darwin":
-        print("install is for macOS. On Windows make a Scheduled Task at logon that runs:  "
+        print("install is for macOS and Windows. Elsewhere start it at login yourself:  "
               f"\"{sys.executable}\" \"{Path(__file__).resolve()}\" run")
         return 2
     logs = Path.home() / "Library" / "Logs" / "VectorRelay"
@@ -555,7 +602,15 @@ def command_install(folder: Path) -> int:
 
 
 def command_remove(folder: Path) -> int:
-    if sys.platform == "darwin":
+    if on_windows():
+        import winreg
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.DeleteValue(key, RUN_NAME)
+        except OSError:
+            pass  # there was no logon item
+    elif sys.platform == "darwin":
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
         launch_agent().unlink(missing_ok=True)
     pid = desk_pid(folder)
