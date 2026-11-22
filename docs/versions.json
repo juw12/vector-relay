@@ -2,6 +2,15 @@
   "note": "The one list of versions. The phone page shows it under Version history; CHANGELOG.md and the Versions part of the README are made from it by scripts/make_changelog.py.",
   "releases": [
     {
+      "version": "1.4.2",
+      "date": "2026-11-22",
+      "pr": 16,
+      "title": "The buttons under Device are tall enough for a finger",
+      "changes": [
+        "**Add device with a code** and the buttons beside a device are 48 px high, where they were 42."
+      ]
+    },
+    {
       "version": "1.4.1",
       "date": "2026-11-22",
       "pr": 15,

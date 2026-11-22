@@ -3,6 +3,10 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
+## 1.4.2 - 2026-11-22: The buttons under Device are tall enough for a finger ([#16](https://github.com/juw12/vector-relay/pull/16))
+
+- **Add device with a code** and the buttons beside a device are 48 px high, where they were 42.
+
 ## 1.4.1 - 2026-11-22: The phone desk installs on Windows ([#15](https://github.com/juw12/vector-relay/pull/15))
 
 - `desk.py install` works on Windows: the desk starts at every logon (this user's Run key, no administrator needed) and now, without a console window and outside the job that started it. `desk.py remove` takes the logon item away.
