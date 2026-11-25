@@ -63,8 +63,8 @@ PHONE_LINE = re.compile(r"^PHONE to=(.*) agent=([a-z]+)[ \t]*$", re.M)  # what `
 RULES = """\
 You carry out a prompt that the owner of this computer sent from his phone through Vector Relay.
 Nobody is at the computer. The prompt at the end of this message is his own message. It is for one
-of his chats, which has finished its last reply; what that chat said is given below so that you
-can go on from there.
+of his chats, which has finished its last reply, or it starts a new chat he opened on the phone;
+what that chat said so far is given below so that you can go on from there.
 
 - Unless this prompt says so plainly: do not send mail or messages to other people, make payments,
   submit forms for good, delete his work, publish, or push to a remote.
@@ -79,7 +79,8 @@ can go on from there.
 """
 
 SAYING = threading.Lock()
-PATH_IN_TEXT = re.compile(r"(?:~|/Users|/home|[A-Za-z]:\\)[^\s`'\"<>)\]]+")
+# a path in the chat's words. "~" counts only before a slash: "~20:25" and "~45 min" mean "about"
+PATH_IN_TEXT = re.compile(r"(?:~(?=[/\\])|/Users|/home|[A-Za-z]:\\)[^\s`'\"<>)\]]+")
 
 
 # ---------------------------------------------------------------- settings and small files
@@ -94,9 +95,23 @@ def desk_settings(folder: Path) -> dict:
     return kept
 
 
+def agent_command(kept: dict) -> list[str]:
+    """The agent to run, as the start of its command line. "agent" in desk.json may also be a list
+    (a program and its first arguments), e.g. a script that Windows cannot start by itself."""
+    named = kept.get("agent")
+    if isinstance(named, list) and named:
+        found = shutil.which(str(named[0])) or shutil.which(str(Path(str(named[0])).expanduser()))
+        return [found, *[str(word) for word in named[1:]]] if found else []
+    program = agent_program(kept)
+    return [program] if program else []
+
+
 def agent_program(kept: dict) -> str:
     """The agent to run: the one in the settings, or OpenCode where it is usually installed."""
-    named = str(kept.get("agent") or "")
+    named = kept.get("agent")
+    if isinstance(named, list):
+        return " ".join(agent_command(kept))
+    named = str(named or "")
     places = [named] if named else ["opencode", "~/.opencode/bin/opencode"]
     for place in places:
         found = shutil.which(place) or shutil.which(str(Path(place).expanduser()))
@@ -116,35 +131,31 @@ def log(folder: Path, text: str) -> None:
         pass
 
 
-def alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if os.name == "nt":  # os.kill(pid, 0) ENDS a process on Windows: ask for its exit code instead
-        import ctypes
-
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        code = ctypes.c_ulong()
-        answered = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return bool(answered) and code.value == 259  # STILL_ACTIVE
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+alive = relay.alive
+desk_pid = relay.desk_pid
 
 
-def desk_pid(folder: Path) -> int:
-    """The pid of the desk that runs for this data folder, or 0."""
-    try:
-        pid = int((folder / "desk.pid").read_text(encoding="ascii").strip())
-    except (OSError, ValueError):
-        return 0
-    return pid if alive(pid) else 0
+# ---------------------------------------------------------------- what the desk is doing, for the phone
+class Work:
+    """working-<chat>.json while the desk carries a prompt out: since when, which app, its last steps.
+    The phone shows it as the chat's live progress; `relay.desk_work` reads it."""
+
+    def __init__(self, folder: Path, chat: str, app: str, first: str) -> None:
+        self.path = folder / f"working-{chat}.json"
+        self.data = {"pid": os.getpid(), "since": int(time.time()), "app": app, "steps": []}
+        self.step(first)
+
+    def step(self, text: str) -> None:
+        text = " ".join(str(text).split())[:relay.WORK_STEP]
+        steps = self.data["steps"]
+        if not text or (steps and steps[-1][1] == text):
+            return
+        steps.append([int(time.time()), text])
+        del steps[:-relay.WORK_STEPS]
+        try:
+            relay.write_json(self.path, self.data)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- what a chat is doing
@@ -185,26 +196,46 @@ def let_go(folder: Path, chat: str, me: str) -> None:
         pass
 
 
+def expanded(text: str) -> Path | None:
+    """The path with ~ made the home folder, or None when it cannot be (no home folder known, an odd ~name)."""
+    try:
+        return Path(text).expanduser()
+    except (RuntimeError, ValueError, OSError):
+        return None
+
+
+def home_folder() -> Path | None:
+    try:
+        return Path.home()
+    except (RuntimeError, KeyError, OSError):  # a process started with no USERPROFILE / HOME
+        return None
+
+
 def work_folder(feed: list[dict], chat: str, kept: dict, folder: Path) -> Path:
     """Where the agent starts: the folder this chat's own words name most, else the desk's own."""
     counted: Counter[str] = Counter()
     for event in chat_events(feed, chat)[-40:]:
         for found in set(PATH_IN_TEXT.findall(str(event.get("text", "")))):
-            path = Path(found.rstrip(".,:;")).expanduser()
+            path = expanded(found.rstrip(".,:;"))
+            if path is None:
+                continue
             for step in range(6):  # the path itself, or the nearest folder above it that exists
-                if path.is_dir():
-                    counted[str(path)] += 1
+                try:
+                    if path.is_dir():
+                        counted[str(path)] += 1
+                        break
+                except OSError:  # a name Windows does not take
                     break
                 if path == path.parent:
                     break
                 path = path.parent
-    home = Path.home()
+    home = home_folder()
     for place, count in counted.most_common():
         path = Path(place)
-        if path != home and home in path.parents and len(path.relative_to(home).parts) >= 2:
+        if home and path != home and home in path.parents and len(path.relative_to(home).parts) >= 2:
             return path
     named = str(kept.get("work_folder") or "")
-    fallback = Path(named).expanduser() if named else folder / "desk-work"
+    fallback = (expanded(named) or folder / "desk-work") if named else folder / "desk-work"
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 
@@ -271,6 +302,7 @@ def carry_out_plainly(folder: Path, chat: str, label: str, prompt: dict, kept: d
     where, limit = folder, minutes * 60 + 300
     say(folder, chat, "update", f"Sent to {to}: Cairn there starts {APPS[app]} on it. {to} has to be on, with Cairn running.")
     log(folder, f"{chat}: prompt {prompt.get('id', '')} -> {APPS[app]} on {to or 'this computer'}")
+    Work(folder, chat, f"{APPS[app]} on {to}", f"sent to {to}: Cairn there starts {APPS[app]}")
     started = time.time()
     try:
         child = subprocess.Popen(command, cwd=str(where), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -335,17 +367,18 @@ def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, sto
     to, app = route(kept)
     if to:
         return carry_out_plainly(folder, chat, label, prompt, kept, stop, to, app)
-    program = agent_program(kept)
-    if not program:
+    start = agent_command(kept)
+    if not start:
         say(folder, chat, "error", "The phone desk has no agent to run: OpenCode was not found on this computer. "
             "Name one in desk.json (\"agent\").")
         return
+    program = start[0]
     feed = relay.read_feed(folder)
     sessions = relay.read_json(folder / "desk-sessions.json", {})
     known = sessions.get(chat) if isinstance(sessions, dict) and isinstance(sessions.get(chat), dict) else {}
     message = told(feed, chat, label, prompt, int(known.get("n", 0)) if known.get("session") else 0)
     where = work_folder(feed, chat, kept, folder)
-    command = [program, "run", "--auto", "--format", "json", "--title", f"Phone: {label or chat}"]
+    command = [*start, "run", "--auto", "--format", "json", "--title", f"Phone: {label or chat}"]
     if known.get("session"):
         command += ["--session", str(known["session"])]
     if kept.get("model"):
@@ -354,6 +387,7 @@ def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, sto
         command += ["--file", str(prompt["image"])]
     command.append(message)
     log(folder, f"{chat}: prompt {prompt.get('id', '')} -> {Path(program).name} in {where}")
+    work = Work(folder, chat, APPS.get(app, Path(program).stem), f"started in {where}")
     started, last_update, session, error = time.time(), time.time(), str(known.get("session") or ""), ""
     texts: dict[str, list[str]] = {}  # message id -> its text parts, in order
     try:
@@ -388,12 +422,15 @@ def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, sto
         kind = event.get("type")
         if kind == "text" and part.get("text"):
             texts.setdefault(str(part.get("messageID", "")), []).append(str(part["text"]))
+            work.step("writing: " + str(part["text"]))
         elif kind == "error":
             found = event.get("error") if isinstance(event.get("error"), dict) else {}
             error = str(found.get("message") or found.get("type") or "the agent reported an error")[:500]
-        elif kind in ("tool_use", "tool") and time.time() - last_update >= UPDATE_GAP_S:
-            last_update = time.time()
-            say(folder, chat, "update", doing(part))
+        elif kind in ("tool_use", "tool"):
+            work.step(doing(part))  # every step for the live view; the feed gets one line every UPDATE_GAP_S
+            if time.time() - last_update >= UPDATE_GAP_S:
+                last_update = time.time()
+                say(folder, chat, "update", doing(part))
     code = child.wait()
     late = (child.stderr.read() or "").strip()
     child.stdout.close()
@@ -502,6 +539,11 @@ def guarded(folder: Path, chat: str, label: str, prompt: dict, kept: dict, stop:
         try:
             say(folder, chat, "error", f"The phone desk failed on this prompt: {problem}")
         except Exception:
+            pass
+    finally:  # the phone stops showing it as at work
+        try:
+            (folder / f"working-{chat}.json").unlink(missing_ok=True)
+        except OSError:
             pass
 
 
@@ -640,7 +682,11 @@ def command_status(folder: Path) -> int:
             mine = (folder / f"listening-{chat}").read_text(encoding="ascii") == me and bool(pid)
         except OSError:
             mine = False
-        if mine:
+        work = relay.desk_work(folder, chat)
+        if work:
+            last = work["steps"][-1][1] if work["steps"] else ""
+            state = f"the desk works on it with {work['app']}, {int(now - work['since']) // 60} min" + (f", now: {last}" if last else "")
+        elif mine:
             state = "finished, the desk holds its line"
         elif held_by_other(folder, chat, me):
             state = "the chat itself waits for a prompt"

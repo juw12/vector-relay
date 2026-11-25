@@ -517,6 +517,16 @@ body.side-open .side {
 .board-link .when { flex: none; margin-left: auto; padding-left: 8px; color: var(--soft); font-size: 14px; font-variant-numeric: tabular-nums; }
 .board-link.chosen { background: var(--chosen); color: var(--ink); }
 .board-link:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.board-link.new-chat { margin-bottom: 6px; color: var(--ink); }
+
+/* ---- what the phone desk is doing for the open chat, while it works */
+.item.work { padding: 11px 14px; border: 1px dashed var(--edge); border-radius: 10px; color: var(--dim); font-size: 14px; }
+.work-head { display: flex; gap: 9px; align-items: center; color: var(--ink); }
+.work-head .spin { border-color: var(--amber); border-top-color: transparent; }
+.work-steps { margin: 8px 0 0; padding: 0; list-style: none; }
+.work-steps li { display: flex; gap: 10px; margin: 3px 0; overflow-wrap: anywhere; }
+.work-steps li.now { color: var(--ink); }
+.work-steps .at { flex: none; color: var(--soft); font-variant-numeric: tabular-nums; }
 .board { display: none; flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 6px calc(16px + env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left)); }
 body.on-board .board { display: block; }
 body.on-board .feed, body.on-board .composer, body.on-board .preview, body.on-board .hint { display: none !important; }

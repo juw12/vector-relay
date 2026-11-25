@@ -2,7 +2,8 @@
 """Stands in for `opencode run --format json` in the desk's tests.
 
 It prints the events the real one prints. What it does is chosen by a word in the message:
-FAIL (an error event), SLOW (it never ends by itself), SILENT (no answer). Otherwise it uses one
+FAIL (an error event), SLOW (it never ends by itself), SILENT (no answer), STEPS (three tools,
+two seconds apart, before it answers: the phone's live view has time to show them). Otherwise it uses one
 tool and answers with the folder it runs in, the session it was given and the last line it was told.
 """
 
@@ -28,6 +29,10 @@ if "SLOW" in message:
     time.sleep(600)
 if "SILENT" in message:
     sys.exit(3)
+if "STEPS" in message:
+    for command in ("git status", "python -m pytest -q", "git diff --stat"):
+        out("tool_use", tool="bash", state={"title": "bash", "input": {"command": command}})
+        time.sleep(2)
 out("text", text="Let me look.")
 out("tool_use", tool="shell", state={"title": "shell", "input": {"command": "ls"}})
 out("step_finish")

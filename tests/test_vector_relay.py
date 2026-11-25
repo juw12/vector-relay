@@ -208,6 +208,52 @@ class PromptTests(Case):
         self.assertEqual(len(answer["event"]["text"]), relay.FEED_TEXT + 500)
 
 
+class NewChatTests(Case):
+    """New chat on the page: the computer opens a chat in phone mode and its desk takes the first prompt."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.folder / "desk.pid").write_text(str(os.getpid()), encoding="ascii")  # a desk runs
+
+    def new(self, text: str, prompt_id: str = "prompt-new1", age_s: float = 0, seen: list | None = None) -> dict:
+        body = relay.seal(self.key, {"route": "new", "t": int((time.time() - age_s) * 1000), "pid": prompt_id, "text": text})
+        return relay.answer_ask(self.folder, self.key, [] if seen is None else seen, body)
+
+    def test_a_new_chat_is_opened_and_its_first_prompt_waits_for_the_desk(self) -> None:
+        answer = self.new("Check the yield deck for week 48 and list what is missing")
+        self.assertTrue(answer["ok"])
+        chat = answer["chat"]
+        self.assertTrue(relay.CHAT_ID.match(chat))
+        entry = relay.chats(self.folder)[chat]
+        self.assertTrue(entry["on"])
+        self.assertLessEqual(len(entry["label"]), relay.NEW_LABEL)
+        self.assertTrue(entry["label"].startswith("Check the yield deck"))
+        self.assertIn(chat, [c["id"] for c in answer["chats"]])
+        self.assertTrue(answer["desk"])
+        self.assertEqual(relay.take_prompt(self.folder, chat)["text"], "Check the yield deck for week 48 and list what is missing")
+        prompt = [event for event in relay.read_feed(self.folder) if event["kind"] == "prompt"][0]
+        self.assertEqual((prompt["from"], prompt["chat"]), ("phone", chat))
+
+    def test_asked_again_it_is_the_same_chat_and_one_prompt(self) -> None:
+        seen: list[str] = []
+        first = self.new("start", seen=seen)["chat"]
+        again = self.new("start", seen=seen)
+        self.assertEqual(again["chat"], first)
+        self.assertEqual(len(relay.chats(self.folder)), 1)
+        self.assertEqual(len(relay.waiting_ids(self.folder)), 1)
+
+    def test_without_a_desk_no_chat_is_opened(self) -> None:
+        (self.folder / "desk.pid").unlink()
+        self.assertEqual(self.new("start"), {"ok": False, "error": "desk"})
+        self.assertEqual(relay.chats(self.folder), {})
+
+    def test_old_empty_or_odd_ones_are_refused(self) -> None:
+        self.assertEqual(self.new("start", age_s=relay.PROMPT_MAX_AGE_S + 5), {"ok": False, "error": "old"})
+        self.assertEqual(self.new("   "), {"ok": False, "error": "bad"})
+        self.assertEqual(self.new("fine", prompt_id="../x"), {"ok": False, "error": "bad"})
+        self.assertEqual(relay.chats(self.folder), {})
+
+
 class ChatTests(Case):
     """Several chats in phone mode at once, and pictures both ways."""
 

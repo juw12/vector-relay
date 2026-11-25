@@ -4,6 +4,7 @@
                                                then local mode: the page from this PC over its Wi-Fi address
     python scripts/e2e.py --live               the same steps on the deployed page and relay (a
                                                throwaway channel that is wiped at the end)
+    python scripts/e2e.py --only desk          New chat and the desk's live steps, nothing else
 
 Needs: pip install playwright; playwright install webkit chromium
 Pictures go to shots/.
@@ -660,6 +661,75 @@ def code_trip(page, expect, root: Path, relay_address: str, base: str, hosts: li
           'code: when its last chat leaves phone mode, the phone still names the computer and the next step')
 
 
+def desk_trip(playwright, expect) -> None:
+    """New chat on the phone, carried out by the phone desk, with its steps live on the page."""
+    scratch = REPO / ".tmp"
+    scratch.mkdir(exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix="desk-e2e-", dir=scratch))
+    fake = FakeRelay()
+    site = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(REPO / "docs")))
+    threading.Thread(target=site.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{site.server_port}/"
+    environment = {**os.environ, "VECTOR_RELAY_HOME": str(folder), "PYTHONIOENCODING": "utf-8"}
+    desk_process, browser, errors = None, None, []
+    try:
+        assert run(folder, "pair", "--relay", fake.address, "--page", base).returncode == 0
+        relay.write_json(folder / "desk.json", {"agent": [sys.executable, str(REPO / "tests" / "fake_agent.py")], "minutes_per_prompt": 2})
+        old = run(folder, "on", "--label", "Atlas FA").stdout.split("chat=")[1][:4]
+        run(folder, "say", "--chat", old, "--kind", "result", "Read just now (24 Nov, ~20:25). Approx ~81 tasks, ~59 min.")
+        browser = playwright.chromium.launch()
+        context = browser.new_context(**playwright.devices["iPhone 14"])
+        page = context.new_page()
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(base + "#r=" + relay.ticket(relay.settings(folder)))
+        expect(page.locator("#title")).to_have_text("Atlas FA", timeout=20_000)
+
+        page.locator("#menu").tap()
+        page.locator("#newChat").tap()
+        expect(page.locator("#title")).to_have_text("New chat")
+        expect(page.locator("#status")).to_contain_text("phone desk does not run", timeout=20_000)
+        check(page.locator("#send").is_disabled(), "new chat: with no desk running, the page says so and sends nothing")
+
+        desk_process = subprocess.Popen([sys.executable, str(REPO / "desk.py"), "run"], env=environment,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        expect(page.locator("#status")).to_contain_text("New chat on", timeout=30_000)
+        check(page.locator("#box").get_attribute("placeholder") == "What should the new chat do?",
+              "new chat: with the desk running, the box asks what the new chat should do")
+        page.screenshot(path=str(REPO / "shots" / "phone-new-chat.png"))
+        page.locator("#box").fill("STEPS check the yield deck for week 48")
+        page.locator("#send").tap()
+        expect(page.locator("#title")).to_have_text("STEPS check the yield deck for week 48", timeout=30_000)
+        check(len(relay.chats_on(folder)) == 2, "new chat: the computer opened a second chat in phone mode, named after the prompt")
+        card = page.locator(".item.work")
+        expect(card).to_be_visible(timeout=30_000)
+        expect(card.locator(".work-steps li")).to_have_count(3, timeout=30_000)
+        check("OpenCode is working" in card.locator(".work-head").inner_text() and "The desk is working" in page.locator("#status").inner_text(),
+              "live: while the desk works, the chat shows a card with the app, how long, and its steps")
+        page.screenshot(path=str(REPO / "shots" / "phone-desk-working.png"))
+        expect(page.locator(".item.result").last).to_contain_text("last=STEPS check the yield deck", timeout=40_000)
+        expect(card).to_have_count(0, timeout=20_000)
+        check(True, "live: the answer comes under the new chat, and the card is gone")
+
+        page.locator("#menu").tap()
+        page.locator(".chip", has_text="Atlas FA").tap()
+        page.locator("#box").fill("which r in asus, which r in mac?")
+        page.locator("#send").tap()
+        expect(page.locator(".item.result").last).to_contain_text("last=which r in asus", timeout=40_000)
+        check(page.locator(".item.error").count() == 0,
+              "a chat whose answer said '~20:25' takes the next prompt (no 'Could not determine home directory')")
+        check(not errors, "no script errors on the page" + (f": {errors[:3]}" if errors else ""))
+    finally:
+        if browser:
+            browser.close()
+        if desk_process:
+            desk_process.terminate()
+            desk_process.wait(timeout=20)
+        run(folder, "stop")
+        site.shutdown()
+        fake.close()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def first_by_code(webkit, iphone, expect, folder: Path, page_address: str, slow: int) -> None:
     """A phone that has no computer yet adds its first one with the 4 digits (page and relay at one address)."""
     made = run(folder, "pair", "--code")
@@ -687,7 +757,17 @@ def main() -> int:
     parser.add_argument("--live", action="store_true", help=f"use the deployed page and relay at {relay.RELAY}")
     parser.add_argument("--relay", default="", help="a deployed relay to go through instead of the one in memory")
     parser.add_argument("--page", default="", help="a deployed phone page to open instead of docs/ on this PC")
+    parser.add_argument("--only", choices=["desk"], help="one trip only")
     chosen = parser.parse_args()
+    if chosen.only == "desk":
+        from playwright.sync_api import expect, sync_playwright
+
+        (REPO / "shots").mkdir(exist_ok=True)
+        with sync_playwright() as playwright:
+            desk_trip(playwright, expect)
+        failed = [what for passed, what in steps if not passed]
+        print(f"\n{len(steps) - len(failed)} of {len(steps)} steps passed")
+        return 1 if failed else 0
     if chosen.live:
         chosen.relay, chosen.page = relay.RELAY, relay.RELAY + "/"
 

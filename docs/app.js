@@ -15,7 +15,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.4.2";  // the newest entry in versions.json; a test keeps the two in step
+  var APP_VERSION = "1.5.0";  // the newest entry in versions.json; a test keeps the two in step
   var KEY = "vrelay.link", PENDING = "vrelay.pending", HINT = "vrelay.hint", CHAT = "vrelay.chat";
   var HANG_MS = 10000;          // a request with no reply for this long is dropped
   var ANSWER_HOLD_S = 4;        // the relay holds the request for the answer this long (a long hold gets cut by its host)
@@ -37,6 +37,7 @@
   var BOARD_ENDED = 12;         // ended chats shown before "Show older"
   var BOARD_WAIT_MS = 6000;     // how long another computer gets to answer for its board
   var BOARD_REST_MS = 120000;   // a computer that did not answer is asked again after this long
+  var NEW = "+new";             // "selected" while the page shows New chat: the first prompt opens a chat on the computer
 
   var $ = function (id) { return document.getElementById(id); };
   var store = (function () {
@@ -215,7 +216,7 @@
   var events = [];          // the feed of every chat, oldest first
   var lastN = 0;            // the newest event number a live answer brought
   var waiting = [];         // prompt ids no chat has picked up yet
-  var info = { chats: [], pc: 0 };
+  var info = { chats: [], pc: 0, desk: null };   // desk: true / false as the computer says, null when it does not say (older)
   var selected = store.getItem(CHAT) || "";   // the chat this page shows and sends to
   var unread = {};          // chat id -> something new came while another chat was shown
   var problem = "";         // what stands between this phone and the PC, in plain words
@@ -250,7 +251,7 @@
 
   /* Keeps the chosen chat while the PC still knows it; else takes one that is in phone mode. */
   function choose() {
-    if (chat(selected)) return;
+    if (chat(selected) || selected === NEW) return;
     var on = info.chats.filter(function (c) { return c.on; })[0];
     selected = (on || info.chats[0] || { id: "" }).id;
     if (selected) store.setItem(CHAT, selected);
@@ -258,7 +259,7 @@
 
   function select(id) {
     selected = id;
-    store.setItem(CHAT, id);
+    if (id !== NEW) store.setItem(CHAT, id);   // a reload opens the last real chat, not an empty New chat
     delete unread[id];
     shown = "";
     render();
@@ -266,7 +267,10 @@
     again();
   }
 
-  function here(event) { return !event.chat || !selected || event.chat === selected; }
+  function here(event) {
+    if (selected === NEW) return event.chat === NEW;   // only the prompt that opens the new chat
+    return !event.chat || !selected || event.chat === selected;
+  }
 
   function merge(answer, live) {
     if (!answer || !Array.isArray(answer.events)) return;
@@ -291,7 +295,8 @@
     events = Object.keys(byNumber).map(function (n) { return byNumber[n]; }).sort(function (a, b) { return a.n - b.n; }).slice(-KEPT_EVENTS);
     if (live) lastN = Math.max(lastN, answer.last || 0);
     if (live && answer.pc) clockOffset = answer.pc * 1000 - Date.now();
-    info = { chats: Array.isArray(answer.chats) ? answer.chats : info.chats, pc: answer.pc || info.pc };
+    info = { chats: Array.isArray(answer.chats) ? answer.chats : info.chats, pc: answer.pc || info.pc,
+             desk: typeof answer.desk === "boolean" ? answer.desk : (live ? null : info.desk) };
     waiting = answer.waiting || [];
     choose();
     var ids = {};
@@ -394,6 +399,13 @@
   function status() {
     var own = chat(selected), seen = visible();
     var last = seen.length ? seen[seen.length - 1] : null;
+    var where = active ? active.name : "your PC";
+    if (selected === NEW) {
+      if (problem) return ["bad", problem, false];
+      if (!info.pc) return ["", "Asking " + where, false];
+      if (info.desk === false) return ["bad", "The phone desk does not run on " + where + ", so nothing would start a new chat. There: desk.py install", false];
+      return ["ok", "New chat on " + where + " · the phone desk starts it", true];
+    }
     if (problem) return ["bad", problem, !!own && own.on];
     if (!info.pc) return ["", "Asking your PC", false];
     if (!own) return ["", active ? "No chat on " + active.name + " is in phone mode. On that computer, type /phone in a chat." : "No chat is in phone mode. On the PC, type /phone in a chat.", false];
@@ -402,11 +414,37 @@
       var nobody = active ? " No chat on " + active.name + " is in phone mode now: on that computer, type /phone in a chat." : " On the PC, type /phone in a chat.";
       return ["", "This chat left phone mode." + (others ? " Pick another one from the chat list." : nobody), false];
     }
+    if (own.work) return ["busy", "The desk is working on it · " + lasted(own.work.since), true];
     if (own.listening && !own.desk) return ["ok", "Vector is waiting for your prompt", true];   // a chat he told to wait
     if (own.done) return ["ok", "Finished " + clock(own.done) + (own.desk ? " · send a prompt any time" : ""), true];
     if (own.desk) return ["ok", "Send a prompt any time", true];   // the desk holds a chat that went quiet
     if (last && Date.now() / 1000 - last.t > SILENT_S) return ["bad", "No word from the chat since " + clock(last.t) + ". It may have stopped: look at the PC.", true];
     return ["busy", "Vector is working" + (last ? " · last word " + ago(last.t) : ""), true];
+  }
+
+  /* "for 4 min", "for 1 h 05": how long the desk has worked so far. */
+  function lasted(since) {
+    var minutes = Math.max(0, Math.floor((Date.now() / 1000 + clockOffset / 1000 - since) / 60));
+    if (minutes < 1) return "for under a minute";
+    return minutes < 60 ? "for " + minutes + " min" : "for " + Math.floor(minutes / 60) + " h " + two(minutes % 60);
+  }
+
+  /* What the phone desk is doing for this chat right now: the app, how long, and its last steps. */
+  function workCard(work) {
+    var card = element("article", "item work");
+    var head = element("div", "work-head");
+    head.appendChild(element("span", "spin"));
+    head.appendChild(element("span", "", (work.app || "The desk") + " is working " + lasted(work.since)));
+    card.appendChild(head);
+    var list = element("ol", "work-steps");
+    (work.steps || []).forEach(function (step, at, all) {
+      var line = element("li", at === all.length - 1 ? "now" : "");
+      line.appendChild(element("span", "at", clock(step[0])));
+      line.appendChild(element("span", "", String(step[1])));
+      list.appendChild(line);
+    });
+    card.appendChild(list);
+    return card;
   }
 
   function picture(event) {
@@ -548,28 +586,35 @@
     var all = visible().concat(pending.filter(here).map(function (p) {
       return { kind: "prompt", from: "phone", text: p.text, t: p.t, state: p.state, why: p.why, pid: p.pid, id: p.pid, chat: p.chat, photo: p.photo, local: p.img ? p.url : "" };
     }));
-    var mark = JSON.stringify([found, selected, info.chats, unread, waiting, all.map(function (e) {
+    var work = own && own.work ? own.work : null;
+    var mark = JSON.stringify([found, selected, info.chats, unread, waiting, work && lasted(work.since), all.map(function (e) {
       return [e.n || e.pid, e.state || "", e.cut ? 1 : 0, e.text.length, e.n && pictures[e.n] ? pictures[e.n].state : ""];
     })]);
     $("dot").className = "dot " + found[0];
     $("status").textContent = found[1];
-    $("title").textContent = own ? chatName(own) : "Vector Relay";
-    document.title = own ? chatName(own) : "Vector Relay";
+    var title = selected === NEW ? "New chat" : own ? chatName(own) : "Vector Relay";
+    $("title").textContent = title;
+    document.title = title;
     $("send").disabled = !found[2];
-    $("box").placeholder = found[2] ? "Send follow-up" : "No chat to send to";
+    $("box").placeholder = !found[2] ? "No chat to send to" : selected === NEW ? "What should the new chat do?" : "Send follow-up";
+    $("newChat").classList.toggle("chosen", selected === NEW && view !== "board");
     chips();
     if (mark === shown) return;
     shown = mark;
     var feed = $("feed");
     var atEnd = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
     feed.textContent = "";
-    if (!all.length) feed.appendChild(element("p", "empty", info.pc ? "Nothing yet. What the chat says will show here." : ""));
+    if (!all.length && selected === NEW) {
+      feed.appendChild(element("p", "empty", "Type what the new chat should do. The phone desk on " + (active ? active.name : "your PC")
+        + " starts it, and it joins the chat list. Its steps show here while it works."));
+    } else if (!all.length) feed.appendChild(element("p", "empty", info.pc ? "Nothing yet. What the chat says will show here." : ""));
     var lastDay = "";
     all.forEach(function (event) {
       var label = day(event.t);
       if (label !== lastDay) { feed.appendChild(element("p", "day", label)); lastDay = label; }
       feed.appendChild(bubble(event));
     });
+    if (work) feed.appendChild(workCard(work));
     if (atEnd) feed.scrollTop = feed.scrollHeight;
     getPictures();
   }
@@ -782,7 +827,11 @@
       return "finished " + moment(item.phone.done) + (item.phone.desk ? " · send a prompt any time" : "");
     }
     if (row.state === "live") {
-      if (item.phone && item.phone.desk) return "send a prompt any time";
+      if (item.phone && item.phone.work) {
+      var steps = item.phone.work.steps || [];
+      return "the desk is working " + lasted(item.phone.work.since) + (steps.length ? " · " + steps[steps.length - 1][1] : "");
+    }
+    if (item.phone && item.phone.desk) return "send a prompt any time";
       if (item.phone) return (item.phone.listening ? "waiting for your prompt" : "working") + far;
       return (row.turn === "waiting" ? "waiting" : "running") + far;
     }
@@ -985,7 +1034,9 @@
     key: "The key on this phone is not the PC's. Scan a new code.",
     off: "That chat is not in phone mode, so nothing would pick it up.",
     chat: "Several chats are in phone mode. Pick one from the chat list, then try again.",
-    photo: "The PC could not read the photo."
+    photo: "The PC could not read the photo.",
+    desk: "The phone desk does not run on that computer, so nothing would start the chat. There: desk.py install",
+    route: "That computer runs an older Vector Relay that cannot start a chat. Update it there."
   };
 
   async function deliver(prompt) {
@@ -996,11 +1047,14 @@
     savePending();
     render();
     busyUntil = Date.now() + BUSY_FOR_MS;
-    var question = { pid: own.pid, text: own.text, chat: own.chat || selected, after: lastN };
+    var opening = own.chat === NEW;
+    var question = { pid: own.pid, text: own.text, chat: opening ? "" : own.chat || selected, after: lastN };
     if (own.img) { question.img = own.img; question.w = own.w; question.h = own.h; mine[own.pid] = own.url; }
     try {
-      var answer = await ask("prompt", question, own.img ? PHOTO_WAIT_MS : PROMPT_WAIT_MS, own.img ? PHOTO_HANG_MS : HANG_MS);
+      var answer = await ask(opening ? "new" : "prompt", question, own.img ? PHOTO_WAIT_MS : PROMPT_WAIT_MS, own.img ? PHOTO_HANG_MS : HANG_MS);
+      if (answer.ok && opening && answer.chat) own.chat = answer.chat;   // the prompt now belongs to the chat it opened
       if (answer.ok) { problem = ""; merge(answer, true); }
+      if (answer.ok && opening && answer.chat && selected === NEW) select(answer.chat);
       else { own.state = "failed"; own.why = WHY[answer.error] || "The PC refused it."; }
     } catch (error) {
       own.state = "failed";
@@ -1339,6 +1393,12 @@
   document.body.classList.toggle("on-board", view === "board");
   $("showBoard").hidden = false;
   $("showBoard").addEventListener("click", function () { setView("board"); side(false); });
+  $("newChat").addEventListener("click", function () {
+    setView("chat");
+    select(NEW);
+    side(false);
+    $("box").focus();
+  });
   $("menu").addEventListener("click", function () { side(!document.body.classList.contains("side-open")); });
   $("shade").addEventListener("click", function () { side(false); });
   $("find").addEventListener("input", chips);
