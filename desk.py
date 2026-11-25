@@ -25,7 +25,7 @@ prompt. This computer with OpenCode is what it does without Cairn. Another compu
 there as a Cairn handoff (`cairn handoff ask`), Cairn there starts the app, and the answer comes back.
 
 Settings: desk.json in the relay's data folder, every key optional:
-    {"agent": "~/.opencode/bin/opencode", "model": "", "minutes_per_prompt": 45,
+    {"agent": "~/.opencode/bin/opencode", "model": "", "minutes_per_prompt": 45, "standalone": "auto",
      "at_once": 2, "work_folder": "", "silent_minutes": 30,
      "cairn": ["python3", "-m", "cairn", "--root", "<the brain>", "--brain", "."], "cairn_env": {"PYTHONPATH": "<Cairn's clone>"}}
 """
@@ -55,7 +55,8 @@ LOOK_S = 1.0  # how often the desk looks at the chats and the inbox
 UPDATE_GAP_S = 30  # at most one "what it is doing" line on the phone this often
 CONTEXT_EVENTS, CONTEXT_EVENT_TEXT, CONTEXT_TEXT = 14, 1_800, 14_000  # what the agent is told of the chat
 ANSWER_TEXT = 20_000  # a longer answer is cut for the phone
-DEFAULTS = {"agent": "", "model": "", "minutes_per_prompt": 45, "at_once": 2, "work_folder": "", "silent_minutes": 30}
+DEFAULTS = {"agent": "", "model": "", "minutes_per_prompt": 45, "at_once": 2, "work_folder": "", "silent_minutes": 30,
+            "standalone": "auto"}
 BUSY_KINDS = ("update", "prompt")  # the chat itself is at work after one of these
 APPS = {"opencode": "OpenCode"}  # what Cairn can choose for a prompt from the phone
 PHONE_LINE = re.compile(r"^PHONE to=(.*) agent=([a-z]+)[ \t]*$", re.M)  # what `cairn vibe hand phone` prints
@@ -118,6 +119,31 @@ def agent_program(kept: dict) -> str:
         if found:
             return found
     return ""
+
+
+_private: dict[tuple, bool] = {}  # agent command -> whether its `run` takes --standalone, asked once
+
+
+def private_server(kept: dict, start: list[str]) -> bool:
+    """True when the agent should run with a private server (--standalone).
+
+    OpenCode builds that have a background service hand `run` to it unless --standalone is given.
+    That service is shared with every other OpenCode session on the computer and starts MCP
+    servers for each folder it sees: on 2026-11-25 a one-word prompt waited 280 s there, and
+    took 11 s with --standalone. "standalone" in desk.json: "auto" (when `run --help` lists it),
+    true or false."""
+    wanted = kept.get("standalone", "auto")
+    if wanted is True or wanted is False:
+        return wanted
+    known = tuple(start)
+    if known not in _private:
+        try:
+            helped = subprocess.run([*start, "run", "--help"], capture_output=True, encoding="utf-8", errors="replace",
+                                    timeout=60, stdin=subprocess.DEVNULL)
+            _private[known] = "--standalone" in (helped.stdout or "") + (helped.stderr or "")
+        except (OSError, subprocess.SubprocessError):
+            return False  # asked again next time
+    return _private[known]
 
 
 def log(folder: Path, text: str) -> None:
@@ -379,6 +405,8 @@ def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, sto
     message = told(feed, chat, label, prompt, int(known.get("n", 0)) if known.get("session") else 0)
     where = work_folder(feed, chat, kept, folder)
     command = [*start, "run", "--auto", "--format", "json", "--title", f"Phone: {label or chat}"]
+    if private_server(kept, start):
+        command.append("--standalone")
     if known.get("session"):
         command += ["--session", str(known["session"])]
     if kept.get("model"):
@@ -420,7 +448,9 @@ def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, sto
         session = str(event.get("sessionID") or session)
         part = event.get("part") if isinstance(event.get("part"), dict) else {}
         kind = event.get("type")
-        if kind == "text" and part.get("text"):
+        if kind == "step_start":
+            work.step("thinking")
+        elif kind == "text" and part.get("text"):
             texts.setdefault(str(part.get("messageID", "")), []).append(str(part["text"]))
             work.step("writing: " + str(part["text"]))
         elif kind == "error":
@@ -670,7 +700,9 @@ def command_status(folder: Path) -> int:
     pid, kept, me = desk_pid(folder), desk_settings(folder), ""
     program = agent_program(kept)
     print(f"Phone desk: {'running, pid ' + str(pid) if pid else 'NOT running  (desk.py install)'}")
-    print(f"Agent:      {program or 'NOT FOUND'}" + (f"   model {kept['model']}" if kept["model"] else "   (its own default model)"))
+    start = agent_command(kept)
+    print(f"Agent:      {program or 'NOT FOUND'}" + (f"   model {kept['model']}" if kept["model"] else "   (its own default model)")
+          + ("   private server (--standalone)" if start and private_server(kept, start) else ""))
     print(f"Limits:     {kept['minutes_per_prompt']} min a prompt, {kept['at_once']} at once, "
           f"a silent chat counts as finished after {kept['silent_minutes']} min")
     me = str(pid)

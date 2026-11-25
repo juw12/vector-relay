@@ -64,7 +64,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")

@@ -2,6 +2,16 @@
   "note": "The one list of versions. The phone page shows it under Version history; CHANGELOG.md and the Versions part of the README are made from it by scripts/make_changelog.py.",
   "releases": [
     {
+      "version": "1.5.1",
+      "date": "2026-11-25",
+      "title": "A prompt from the phone starts in seconds, not minutes",
+      "changes": [
+        "The phone desk runs OpenCode with its own private server (`--standalone`) when that OpenCode has one. Through the background service it shares with every other OpenCode session, a one-word prompt waited 280 s for the service and its MCP servers; with a private server it takes about 11 s. The chat's session goes on as before. `\"standalone\": false` in `desk.json` turns it off.",
+        "The live card shows **thinking** as soon as the model starts a step, so it moves before the first tool.",
+        "`desk.py status` says when the desk uses a private server."
+      ]
+    },
+    {
       "version": "1.5.0",
       "date": "2026-11-25",
       "title": "New chat from the phone, and what the desk is doing while it works",
@@ -10,7 +20,8 @@
         "While the desk works on a prompt, the chat shows a live card: the app, how long it has worked, and its last steps (each tool it uses). The status line says **The desk is working on it**, and All chats shows the last step. `status` and `desk.py status` say the same on the computer.",
         "Fixed: a chat whose answer said `~20:25` (about 20:25) failed every next prompt with **Could not determine home directory**: the desk read the `~` as a home folder. A `~` now counts as a path only before a slash, and an odd one is skipped.",
         "`agent` in `desk.json` may be a list (a program and its first arguments). The desk's tests run on Windows."
-      ]
+      ],
+      "pr": 18
     },
     {
       "version": "1.4.2",
