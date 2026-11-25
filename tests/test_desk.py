@@ -241,6 +241,36 @@ class AboutAndHome(DeskCase):
             self.assertEqual(desk.work_folder(feed, "home", desk.desk_settings(self.folder), self.folder), self.folder / "desk-work")
 
 
+class PrivateServer(DeskCase):
+    """2026-11-25: through OpenCode's shared background service a one-word prompt took 280 s; with
+    --standalone (a private server) 11 s. The desk asks for one when the agent knows the flag."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        desk._private.clear()
+
+    def test_an_agent_that_knows_standalone_runs_with_a_private_server(self) -> None:
+        chat = self.chat("priv", ("result", "Done."))
+        relay.put_prompt(self.folder, chat, "p1", "hello")
+        self.look()
+        self.assertIn("standalone=True", self.said(chat, "result")[-1])
+
+    def test_desk_json_can_say_no(self) -> None:
+        kept = relay.read_json(self.folder / "desk.json", {})
+        relay.write_json(self.folder / "desk.json", {**kept, "standalone": False})
+        chat = self.chat("shar", ("result", "Done."))
+        relay.put_prompt(self.folder, chat, "p1", "hello")
+        self.look()
+        self.assertIn("standalone=False", self.said(chat, "result")[-1])
+
+    def test_an_agent_without_the_flag_is_run_as_before(self) -> None:
+        with mock.patch.object(desk.subprocess, "run", return_value=types.SimpleNamespace(stdout="FLAGS\n  --auto", stderr="")):
+            self.assertFalse(desk.private_server({"standalone": "auto"}, ["/bin/old-opencode"]))
+        with mock.patch.object(desk.subprocess, "run", side_effect=OSError("gone")):
+            self.assertFalse(desk.private_server({"standalone": "auto"}, ["/bin/missing"]))
+        self.assertNotIn(("/bin/missing",), desk._private)  # asked again next time
+
+
 class LiveWork(DeskCase):
     """What the desk is doing for a chat travels to the phone while it works, and is gone after."""
 

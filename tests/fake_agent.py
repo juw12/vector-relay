@@ -13,6 +13,9 @@ import sys
 import time
 
 arguments = sys.argv[1:]
+if arguments[-2:] == ["run", "--help"] or arguments == ["run", "--help"]:
+    print("FLAGS\n  --standalone    Run with a private server instead of the background service")
+    sys.exit(0)
 message = arguments[-1]
 session = arguments[arguments.index("--session") + 1] if "--session" in arguments else "ses_fake1"
 
@@ -37,5 +40,6 @@ out("text", text="Let me look.")
 out("tool_use", tool="shell", state={"title": "shell", "input": {"command": "ls"}})
 out("step_finish")
 out("text", message="msg_2", text=f"cwd={os.getcwd()}")
-out("text", message="msg_2", text=f"session={session} files={arguments.count('--file')} last={message.splitlines()[-1]}")
+out("text", message="msg_2", text=f"session={session} files={arguments.count('--file')} standalone={'--standalone' in arguments} "
+                                  f"last={message.splitlines()[-1]}")
 out("step_finish", message="msg_2")

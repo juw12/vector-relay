@@ -3,7 +3,13 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
-## 1.5.0 - 2026-11-25: New chat from the phone, and what the desk is doing while it works
+## 1.5.1 - 2026-11-25: A prompt from the phone starts in seconds, not minutes
+
+- The phone desk runs OpenCode with its own private server (`--standalone`) when that OpenCode has one. Through the background service it shares with every other OpenCode session, a one-word prompt waited 280 s for the service and its MCP servers; with a private server it takes about 11 s. The chat's session goes on as before. `"standalone": false` in `desk.json` turns it off.
+- The live card shows **thinking** as soon as the model starts a step, so it moves before the first tool.
+- `desk.py status` says when the desk uses a private server.
+
+## 1.5.0 - 2026-11-25: New chat from the phone, and what the desk is doing while it works ([#18](https://github.com/juw12/vector-relay/pull/18))
 
 - **New chat** at the top of the chat list: the first prompt opens a chat in phone mode on that computer, and its phone desk carries it out. The chat joins the list under the first words of the prompt. A computer whose desk does not run says so instead of taking the prompt.
 - While the desk works on a prompt, the chat shows a live card: the app, how long it has worked, and its last steps (each tool it uses). The status line says **The desk is working on it**, and All chats shows the last step. `status` and `desk.py status` say the same on the computer.
