@@ -426,6 +426,13 @@ body.side-open .side {
 
 .composer textarea::placeholder { color: var(--soft); opacity: 1; }
 
+/* New chat: who carries it out, when the computer has more than one agent */
+.agents { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 4px 0; }
+.agents[hidden] { display: none; }
+.agents .agent { min-height: 36px; padding: 0 14px; border: 1px solid var(--edge); border-radius: 999px; background: transparent; color: var(--dim); font-size: 14px; cursor: pointer; }
+.agents .agent.chosen { border-color: var(--ink); background: var(--chosen); color: var(--ink); }
+.agents .agent:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+
 .tools { display: flex; align-items: center; justify-content: space-between; }
 
 .composer .attach, .composer .send {

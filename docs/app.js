@@ -15,7 +15,7 @@
 (function () {
   "use strict";
 
-  var APP_VERSION = "1.5.1";  // the newest entry in versions.json; a test keeps the two in step
+  var APP_VERSION = "1.6.0";  // the newest entry in versions.json; a test keeps the two in step
   var KEY = "vrelay.link", PENDING = "vrelay.pending", HINT = "vrelay.hint", CHAT = "vrelay.chat";
   var HANG_MS = 10000;          // a request with no reply for this long is dropped
   var ANSWER_HOLD_S = 4;        // the relay holds the request for the answer this long (a long hold gets cut by its host)
@@ -37,6 +37,7 @@
   var BOARD_ENDED = 12;         // ended chats shown before "Show older"
   var BOARD_WAIT_MS = 6000;     // how long another computer gets to answer for its board
   var BOARD_REST_MS = 120000;   // a computer that did not answer is asked again after this long
+  var AGENT = "vrelay.agent";   // the agent last picked for a new chat
   var NEW = "+new";             // "selected" while the page shows New chat: the first prompt opens a chat on the computer
 
   var $ = function (id) { return document.getElementById(id); };
@@ -216,7 +217,8 @@
   var events = [];          // the feed of every chat, oldest first
   var lastN = 0;            // the newest event number a live answer brought
   var waiting = [];         // prompt ids no chat has picked up yet
-  var info = { chats: [], pc: 0, desk: null };   // desk: true / false as the computer says, null when it does not say (older)
+  var info = { chats: [], pc: 0, desk: null, agents: [] };   // desk: true / false as the computer says, null when it does not say (older)
+  var agent = store.getItem(AGENT) || "";   // the agent a new chat starts with: one of info.agents, "" = the desk's usual one
   var selected = store.getItem(CHAT) || "";   // the chat this page shows and sends to
   var unread = {};          // chat id -> something new came while another chat was shown
   var problem = "";         // what stands between this phone and the PC, in plain words
@@ -242,7 +244,7 @@
 
   function savePending() {
     store.setItem(PENDING, JSON.stringify(pending.map(function (p) {
-      return { pid: p.pid, text: p.text, t: p.t, chat: p.chat, state: p.state, why: p.why, photo: p.photo };
+      return { pid: p.pid, text: p.text, t: p.t, chat: p.chat, state: p.state, why: p.why, photo: p.photo, agent: p.agent };
     })));
   }
 
@@ -296,7 +298,8 @@
     if (live) lastN = Math.max(lastN, answer.last || 0);
     if (live && answer.pc) clockOffset = answer.pc * 1000 - Date.now();
     info = { chats: Array.isArray(answer.chats) ? answer.chats : info.chats, pc: answer.pc || info.pc,
-             desk: typeof answer.desk === "boolean" ? answer.desk : (live ? null : info.desk) };
+             desk: typeof answer.desk === "boolean" ? answer.desk : (live ? null : info.desk),
+             agents: Array.isArray(answer.agents) ? answer.agents : (live ? [] : info.agents) };
     waiting = answer.waiting || [];
     choose();
     var ids = {};
@@ -395,6 +398,36 @@
 
   function visible() { return events.filter(here); }
 
+  /* The agent a new chat starts with: the one picked here if that computer has it, else its usual one. */
+  function chosenAgent() {
+    return info.agents.filter(function (a) { return a.id === agent; })[0] || info.agents[0] || null;
+  }
+
+  /* New chat, on a computer with more than one agent: one button each, the chosen one marked. */
+  function agentPicker() {
+    var row = $("agents"), show = selected === NEW && view !== "board" && info.agents.length > 1;
+    var chosen = chosenAgent();
+    var mark = show ? JSON.stringify([info.agents, chosen && chosen.id]) : "";
+    row.hidden = !show;
+    if (row.getAttribute("data-mark") === mark) return;
+    row.setAttribute("data-mark", mark);
+    row.textContent = "";
+    if (!show) return;
+    info.agents.forEach(function (a) {
+      var button = element("button", "agent" + (chosen && a.id === chosen.id ? " chosen" : ""), a.name);
+      button.type = "button";
+      button.setAttribute("aria-pressed", chosen && a.id === chosen.id ? "true" : "false");
+      button.addEventListener("click", function () {
+        agent = a.id;
+        store.setItem(AGENT, agent);
+        shown = "";
+        render();
+        $("box").focus();
+      });
+      row.appendChild(button);
+    });
+  }
+
   /* [dot, words, may a prompt be sent] for the chat this page shows. */
   function status() {
     var own = chat(selected), seen = visible();
@@ -404,7 +437,8 @@
       if (problem) return ["bad", problem, false];
       if (!info.pc) return ["", "Asking " + where, false];
       if (info.desk === false) return ["bad", "The phone desk does not run on " + where + ", so nothing would start a new chat. There: desk.py install", false];
-      return ["ok", "New chat on " + where + " · the phone desk starts it", true];
+      var starts = info.agents.length > 1 && chosenAgent() ? chosenAgent().name + " carries it out" : "the phone desk starts it";
+      return ["ok", "New chat on " + where + " · " + starts, true];
     }
     if (problem) return ["bad", problem, !!own && own.on];
     if (!info.pc) return ["", "Asking your PC", false];
@@ -598,6 +632,7 @@
     $("send").disabled = !found[2];
     $("box").placeholder = !found[2] ? "No chat to send to" : selected === NEW ? "What should the new chat do?" : "Send follow-up";
     $("newChat").classList.toggle("chosen", selected === NEW && view !== "board");
+    agentPicker();
     chips();
     if (mark === shown) return;
     shown = mark;
@@ -606,7 +641,8 @@
     feed.textContent = "";
     if (!all.length && selected === NEW) {
       feed.appendChild(element("p", "empty", "Type what the new chat should do. The phone desk on " + (active ? active.name : "your PC")
-        + " starts it, and it joins the chat list. Its steps show here while it works."));
+        + " starts it, and it joins the chat list. Its steps show here while it works."
+        + (info.agents.length > 1 ? " Pick who carries it out above the prompt box; the chat stays with that one." : "")));
     } else if (!all.length) feed.appendChild(element("p", "empty", info.pc ? "Nothing yet. What the chat says will show here." : ""));
     var lastDay = "";
     all.forEach(function (event) {
@@ -1049,6 +1085,7 @@
     busyUntil = Date.now() + BUSY_FOR_MS;
     var opening = own.chat === NEW;
     var question = { pid: own.pid, text: own.text, chat: opening ? "" : own.chat || selected, after: lastN };
+    if (opening && own.agent) question.agent = own.agent;
     if (own.img) { question.img = own.img; question.w = own.w; question.h = own.h; mine[own.pid] = own.url; }
     try {
       var answer = await ask(opening ? "new" : "prompt", question, own.img ? PHOTO_WAIT_MS : PROMPT_WAIT_MS, own.img ? PHOTO_HANG_MS : HANG_MS);
@@ -1431,6 +1468,7 @@
     var text = box.value.trim();
     if ((!text && !photo) || $("send").disabled) return;
     var prompt = { pid: randomId(), text: text || "(photo)", t: Math.floor(Date.now() / 1000), chat: selected, state: "sending" };
+    if (selected === NEW && info.agents.length > 1 && chosenAgent()) prompt.agent = chosenAgent().id;
     if (photo) { prompt.photo = true; prompt.img = photo.data; prompt.w = photo.w; prompt.h = photo.h; prompt.url = photo.url; }
     pending.push(prompt);
     box.value = "";

@@ -64,7 +64,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -335,6 +335,20 @@ def desk_work(folder: Path, chat: str) -> dict | None:
     return {"since": int(found.get("since", 0)), "app": str(found.get("app", ""))[:40], "steps": steps}
 
 
+AGENT_ID = re.compile(r"^[a-z][a-z0-9]{1,15}$")
+
+
+def desk_agents(folder: Path) -> list[dict]:
+    """The agents the phone desk on this computer can start for a new chat, the usual one first:
+    [{"id": "opencode", "name": "OpenCode"}, ...]. The desk writes the list (desk-agents.json) while it runs."""
+    if not desk_pid(folder):
+        return []
+    found = read_json(folder / "desk-agents.json", [])
+    return [{"id": str(row["id"]), "name": one_line(str(row.get("name") or row["id"]), 20)}
+            for row in (found if isinstance(found, list) else [])
+            if isinstance(row, dict) and AGENT_ID.match(str(row.get("id", "")))][:6]
+
+
 def desk_holds(folder: Path, chat: str) -> bool:
     """True while the phone desk, not the chat itself, holds this chat's line."""
     try:
@@ -475,7 +489,7 @@ def feed_answer(folder: Path, after: int = 0, limit: int = FEED_EVENTS, text_max
     chosen.reverse()
     return {
         "ok": True, "v": VERSION, "pc": int(time.time()), "mode": mode(folder), "listening": listening(folder),
-        "deviceName": device_name(), "desk": bool(desk_pid(folder)),
+        "deviceName": device_name(), "desk": bool(desk_pid(folder)), "agents": desk_agents(folder),
         "chats": chat_list(folder), "waiting": waiting_ids(folder), "last": last, "events": chosen,
         "board": board_rows(folder), "machine": str(settings(folder).get("notesThis", ""))[:40],
     }
@@ -769,10 +783,12 @@ def waiting_ids(folder: Path, chat: str = "") -> list[str]:
     return [prompt_id for path, prompt_id in waiting(folder, chat)]
 
 
-def put_prompt(folder: Path, chat: str, prompt_id: str, text: str, image: str = "") -> None:
+def put_prompt(folder: Path, chat: str, prompt_id: str, text: str, image: str = "", agent: str = "") -> None:
+    """agent: the one picked on the phone for a new chat ("" = the desk's usual one)."""
     path = inbox(folder) / f"{time.time_ns()}-{chat}-{prompt_id}.json"
     temporary = path.with_suffix(".tmp")
-    prompt = {"id": prompt_id, "chat": chat, "t": int(time.time()), "text": text, **({"image": image} if image else {})}
+    prompt = {"id": prompt_id, "chat": chat, "t": int(time.time()), "text": text, **({"image": image} if image else {}),
+              **({"agent": agent} if agent else {})}
     temporary.write_text(json.dumps(prompt, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, path)
 
@@ -883,7 +899,9 @@ def answer_ask(folder: Path, key: bytes, seen: list[str], body: str, clock=time.
             write_json(folder / "seen.json", seen)
             label = str(ask.get("label", "")).strip() or text
             chat = open_chat(folder, one_line(label, NEW_LABEL))
-            put_prompt(folder, chat, prompt_id, text, str(files(folder) / photo["f"]) if photo else "")
+            picked = str(ask.get("agent", ""))  # the agent chosen on the page; one the desk does not have is not passed on
+            picked = picked if picked in [row["id"] for row in desk_agents(folder)] else ""
+            put_prompt(folder, chat, prompt_id, text, str(files(folder) / photo["f"]) if photo else "", picked)
             add_event(folder, "prompt", text, source="phone", id=prompt_id, chat=chat, **({"img": photo} if photo else {}))
         return {**feed_answer(folder, after), "chat": chat}
     if route == "prompt":

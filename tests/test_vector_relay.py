@@ -247,6 +247,20 @@ class NewChatTests(Case):
         self.assertEqual(self.new("start"), {"ok": False, "error": "desk"})
         self.assertEqual(relay.chats(self.folder), {})
 
+    def test_the_agent_picked_on_the_page_goes_with_the_first_prompt(self) -> None:
+        relay.write_json(self.folder / "desk-agents.json", [{"id": "opencode", "name": "OpenCode"}, {"id": "talos", "name": "Talos"}])
+        body = relay.seal(self.key, {"route": "new", "t": int(time.time() * 1000), "pid": "prompt-new2", "text": "start", "agent": "talos"})
+        answer = relay.answer_ask(self.folder, self.key, [], body)
+        self.assertEqual([row["id"] for row in answer["agents"]], ["opencode", "talos"])
+        self.assertEqual(relay.take_prompt(self.folder, answer["chat"])["agent"], "talos")
+
+    def test_an_agent_the_desk_does_not_have_is_not_passed_on(self) -> None:
+        relay.write_json(self.folder / "desk-agents.json", [{"id": "opencode", "name": "OpenCode"}, {"id": "../x", "name": "Odd"}])
+        body = relay.seal(self.key, {"route": "new", "t": int(time.time() * 1000), "pid": "prompt-new3", "text": "start", "agent": "talos"})
+        answer = relay.answer_ask(self.folder, self.key, [], body)
+        self.assertEqual(answer["agents"], [{"id": "opencode", "name": "OpenCode"}])  # the odd row is dropped
+        self.assertNotIn("agent", relay.take_prompt(self.folder, answer["chat"]))
+
     def test_old_empty_or_odd_ones_are_refused(self) -> None:
         self.assertEqual(self.new("start", age_s=relay.PROMPT_MAX_AGE_S + 5), {"ok": False, "error": "old"})
         self.assertEqual(self.new("   "), {"ok": False, "error": "bad"})

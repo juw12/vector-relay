@@ -3,6 +3,13 @@
 Made from `docs/versions.json` by `scripts/make_changelog.py`. Do not edit by hand.
 The phone page shows the same list under **Version history**.
 
+## 1.6.0 - 2026-11-25: Talos on the phone: pick who carries out a new chat
+
+- The phone desk can start **Talos** ([github.com/juw12/talos](https://github.com/juw12/talos)) as well as OpenCode. On a computer that has both, **New chat** shows one button for each above the prompt box; the page remembers the last pick.
+- A chat stays with the agent it was started with, and its next prompts go on in that agent's session. Chats that were started before, and chats put in phone mode at the computer, run OpenCode as they did.
+- A Talos chat shows its steps in the live card like an OpenCode one, and when it changed files its answer ends with Talos' own check of that work (**checked**, **check failed**, **re-read only** or **unverified**). A run Talos stopped (no model answered, for one) comes back as an error with its reason.
+- Talos is named in `desk.json`: `"talos": ["python", "-m", "talos"]`, `"talos_env": {"PYTHONPATH": "<Talos' clone>"}`, and `"talos_model"` for another model than Talos' own. It may be left out when the `talos` command is on the PATH. It needs a Talos with `run --events` (2026-11-25 or newer).
+
 ## 1.5.1 - 2026-11-25: A prompt from the phone starts in seconds, not minutes
 
 - The phone desk runs OpenCode with its own private server (`--standalone`) when that OpenCode has one. Through the background service it shares with every other OpenCode session, a one-word prompt waited 280 s for the service and its MCP servers; with a private server it takes about 11 s. The chat's session goes on as before. `"standalone": false` in `desk.json` turns it off.

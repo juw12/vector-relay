@@ -15,6 +15,9 @@ holds the line for every chat in phone mode that has finished its reply. The cha
     desk.py status              is it running, which chats it holds, what it is working on
     desk.py feed --chat <id>    what was said in one chat, the desk's work included
 
+The agent is OpenCode, or Talos (github.com/juw12/talos) when it is on this computer too: the phone's
+New chat page then offers both, and a chat stays with the one it was started with.
+
 A chat is finished when the last thing the computer posted for it is a result, an error or a
 note, or when it has posted nothing for SILENT_S. The desk lets go of a chat the moment that chat
 posts an update again, and of a chat that another listener (a chat told to wait) takes over.
@@ -27,7 +30,9 @@ there as a Cairn handoff (`cairn handoff ask`), Cairn there starts the app, and 
 Settings: desk.json in the relay's data folder, every key optional:
     {"agent": "~/.opencode/bin/opencode", "model": "", "minutes_per_prompt": 45, "standalone": "auto",
      "at_once": 2, "work_folder": "", "silent_minutes": 30,
+     "talos": ["python", "-m", "talos"], "talos_env": {"PYTHONPATH": "<Talos' clone>"}, "talos_model": "",
      "cairn": ["python3", "-m", "cairn", "--root", "<the brain>", "--brain", "."], "cairn_env": {"PYTHONPATH": "<Cairn's clone>"}}
+"talos" may be left out when the `talos` command is on the PATH.
 """
 
 from __future__ import annotations
@@ -58,7 +63,7 @@ ANSWER_TEXT = 20_000  # a longer answer is cut for the phone
 DEFAULTS = {"agent": "", "model": "", "minutes_per_prompt": 45, "at_once": 2, "work_folder": "", "silent_minutes": 30,
             "standalone": "auto"}
 BUSY_KINDS = ("update", "prompt")  # the chat itself is at work after one of these
-APPS = {"opencode": "OpenCode"}  # what Cairn can choose for a prompt from the phone
+APPS = {"opencode": "OpenCode", "talos": "Talos"}  # what the phone, or Cairn, can choose for a prompt
 PHONE_LINE = re.compile(r"^PHONE to=(.*) agent=([a-z]+)[ \t]*$", re.M)  # what `cairn vibe hand phone` prints
 
 RULES = """\
@@ -119,6 +124,39 @@ def agent_program(kept: dict) -> str:
         if found:
             return found
     return ""
+
+
+def talos_command(kept: dict) -> list[str]:
+    """Talos as the start of its command line: "talos" in desk.json (a program and its first
+    arguments), or the `talos` command when it is on the PATH. Empty: no Talos here."""
+    named = kept.get("talos")
+    if isinstance(named, str) and named:
+        named = [named]
+    if isinstance(named, list) and named:
+        found = shutil.which(str(named[0])) or shutil.which(str(Path(str(named[0])).expanduser()))
+        return [found, *[str(word) for word in named[1:]]] if found else []
+    found = shutil.which("talos")
+    return [found] if found else []
+
+
+def talos_environment(kept: dict) -> dict:
+    more = kept.get("talos_env") if isinstance(kept.get("talos_env"), dict) else {}
+    return {**os.environ, "PYTHONIOENCODING": "utf-8", **{str(name): str(value) for name, value in more.items()}}
+
+
+def agents_here(kept: dict) -> list[str]:
+    """The agents this desk can start, the usual one first."""
+    return [app for app, there in (("opencode", agent_command(kept)), ("talos", talos_command(kept))) if there]
+
+
+def tell_agents(folder: Path, kept: dict) -> None:
+    """desk-agents.json: what the phone's New chat page may offer. Written only when it changes."""
+    rows = [{"id": app, "name": APPS[app]} for app in agents_here(kept)]
+    if relay.read_json(folder / "desk-agents.json", None) != rows:
+        try:
+            relay.write_json(folder / "desk-agents.json", rows)
+        except OSError:
+            pass
 
 
 _private: dict[tuple, bool] = {}  # agent command -> whether its `run` takes --standalone, asked once
@@ -390,38 +428,58 @@ def doing(part: dict) -> str:
 
 def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, stop: threading.Event) -> None:
     """Runs the agent on one prompt and posts what it says under the chat's id."""
-    to, app = route(kept)
-    if to:
-        return carry_out_plainly(folder, chat, label, prompt, kept, stop, to, app)
-    start = agent_command(kept)
+    sessions = relay.read_json(folder / "desk-sessions.json", {})
+    known = sessions.get(chat) if isinstance(sessions, dict) and isinstance(sessions.get(chat), dict) else {}
+    here = agents_here(kept)
+    # the agent picked on the phone for a new chat, else the one this chat was started with, else Cairn's choice
+    picked = next((str(name) for name in (prompt.get("agent"), known.get("app")) if name in here), "")
+    if picked:
+        app = picked
+    else:
+        to, app = route(kept)
+        if to:
+            return carry_out_plainly(folder, chat, label, prompt, kept, stop, to, app)
+        app = app if app in here else (here[0] if here else "opencode")
+    start = talos_command(kept) if app == "talos" else agent_command(kept)
     if not start:
         say(folder, chat, "error", "The phone desk has no agent to run: OpenCode was not found on this computer. "
             "Name one in desk.json (\"agent\").")
         return
     program = start[0]
     feed = relay.read_feed(folder)
-    sessions = relay.read_json(folder / "desk-sessions.json", {})
-    known = sessions.get(chat) if isinstance(sessions, dict) and isinstance(sessions.get(chat), dict) else {}
+    if known.get("app", "opencode") != app:  # a session of the other agent is not this one's
+        known = {}
     message = told(feed, chat, label, prompt, int(known.get("n", 0)) if known.get("session") else 0)
     where = work_folder(feed, chat, kept, folder)
-    command = [*start, "run", "--auto", "--format", "json", "--title", f"Phone: {label or chat}"]
-    if private_server(kept, start):
-        command.append("--standalone")
-    if known.get("session"):
-        command += ["--session", str(known["session"])]
-    if kept.get("model"):
-        command += ["--model", str(kept["model"])]
-    if prompt.get("image") and Path(str(prompt["image"])).is_file():
-        command += ["--file", str(prompt["image"])]
+    photo = str(prompt["image"]) if prompt.get("image") and Path(str(prompt["image"])).is_file() else ""
+    environment = None
+    if app == "talos":
+        command = [*start, *(["-m", str(kept["talos_model"])] if kept.get("talos_model") else []), "run", "--yes", "--events"]
+        if known.get("session"):
+            command += ["--session", str(known["session"])]
+        if photo:  # Talos looks at a picture with its read tool
+            message += f"\n\n(A photo came with this prompt. Read it first: {photo})"
+        environment = talos_environment(kept)
+    else:
+        command = [*start, "run", "--auto", "--format", "json", "--title", f"Phone: {label or chat}"]
+        if private_server(kept, start):
+            command.append("--standalone")
+        if known.get("session"):
+            command += ["--session", str(known["session"])]
+        if kept.get("model"):
+            command += ["--model", str(kept["model"])]
+        if photo:
+            command += ["--file", photo]
     command.append(message)
-    log(folder, f"{chat}: prompt {prompt.get('id', '')} -> {Path(program).name} in {where}")
+    log(folder, f"{chat}: prompt {prompt.get('id', '')} -> {APPS.get(app, Path(program).name)} in {where}")
     work = Work(folder, chat, APPS.get(app, Path(program).stem), f"started in {where}")
     started, last_update, session, error = time.time(), time.time(), str(known.get("session") or ""), ""
     texts: dict[str, list[str]] = {}  # message id -> its text parts, in order
+    proof = ""  # Talos: how it checked its own work, one line
     try:
         child = subprocess.Popen(
             command, cwd=str(where), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            encoding="utf-8", errors="replace", start_new_session=True,
+            encoding="utf-8", errors="replace", start_new_session=True, env=environment,
         )
     except OSError as problem:
         say(folder, chat, "error", f"The phone desk could not start its agent: {problem}")
@@ -445,6 +503,32 @@ def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, sto
             continue
         if not isinstance(event, dict):
             continue
+        if app == "talos":  # `talos run --events`: {"event": ..., "data": ...}
+            name, data = str(event.get("event", "")), event.get("data")
+            if name == "session" and isinstance(data, dict):
+                session = str(data.get("session") or session)
+                work.step("thinking" + (f" ({data['model']})" if data.get("model") else ""))
+            elif name == "assistant" and isinstance(data, str) and data.strip():
+                texts.setdefault(f"said{len(texts)}", []).append(data)
+                work.step("writing: " + data)
+            elif name == "tool" and isinstance(data, dict):
+                line = doing({"tool": data.get("name"), "state": {"input": data.get("arguments")}})
+                work.step(line)
+                if time.time() - last_update >= UPDATE_GAP_S:
+                    last_update = time.time()
+                    say(folder, chat, "update", line)
+            elif name == "warning" and isinstance(data, str):
+                work.step(data)
+            elif name == "result" and isinstance(data, dict):
+                session = str(data.get("session") or session)
+                final = str(data.get("text") or "").strip()
+                if data.get("stopped"):
+                    error = (final or f"Talos stopped: {data['stopped']}")[:500]
+                elif final:
+                    texts = {"final": [final]}
+                level = str((data.get("proof") or {}).get("level") or "") if isinstance(data.get("proof"), dict) else ""
+                proof = "" if level in ("", "nothing changed") else f"Talos' own check of this work: {level}."
+            continue
         session = str(event.get("sessionID") or session)
         part = event.get("part") if isinstance(event.get("part"), dict) else {}
         kind = event.get("type")
@@ -466,6 +550,8 @@ def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, sto
     child.stdout.close()
     child.stderr.close()
     answer = "\n\n".join(texts[list(texts)[-1]]).strip() if texts else ""
+    if answer and proof and not error:
+        answer += "\n\n" + proof
     minutes = (time.time() - started) / 60
     if stop.is_set():
         say(folder, chat, "error", "The phone desk was stopped while it worked on this prompt. Send it again when the desk is back.")
@@ -482,7 +568,7 @@ def carry_out(folder: Path, chat: str, label: str, prompt: dict, kept: dict, sto
     with relay.locked(folder):
         sessions = relay.read_json(folder / "desk-sessions.json", {})
         sessions = sessions if isinstance(sessions, dict) else {}
-        sessions[chat] = {"session": session, "n": feed[-1]["n"] if feed else 0, "t": int(time.time())}
+        sessions[chat] = {"session": session, "n": feed[-1]["n"] if feed else 0, "t": int(time.time()), "app": app}
         relay.write_json(folder / "desk-sessions.json", sessions)
     log(folder, f"{chat}: prompt {prompt.get('id', '')} done in {minutes:.1f} min, code {code}, "
         f"{len(answer)} characters{', error: ' + error if error else ''}")
@@ -503,13 +589,16 @@ def run_desk(folder: Path, once: bool = False) -> int:
     held: set[str] = set()
     last_beat = 0.0
     if not once:
-        log(folder, f"desk {relay.VERSION} started, pid {me}, agent {agent_program(desk_settings(folder)) or 'NOT FOUND'}")
+        log(folder, f"desk {relay.VERSION} started, pid {me}, agent {agent_program(desk_settings(folder)) or 'NOT FOUND'}"
+            f", Talos {' '.join(talos_command(desk_settings(folder))) or 'not here'}")
     if not once:
         print(f"The phone desk is running (pid {me}). Ctrl+C stops it.", flush=True)
     try:
         while not stop.is_set():
             now = time.time()
             kept = desk_settings(folder)
+            if now - last_beat >= relay.LISTEN_BEAT_S:
+                tell_agents(folder, kept)
             found = relay.chats(folder)
             on = [chat for chat, entry in found.items() if entry["on"]]
             feed = relay.read_feed(folder) if on else []
@@ -703,6 +792,10 @@ def command_status(folder: Path) -> int:
     start = agent_command(kept)
     print(f"Agent:      {program or 'NOT FOUND'}" + (f"   model {kept['model']}" if kept["model"] else "   (its own default model)")
           + ("   private server (--standalone)" if start and private_server(kept, start) else ""))
+    if talos_command(kept):
+        print(f"Talos:      {' '.join(talos_command(kept))}"
+              + (f"   model {kept['talos_model']}" if kept.get("talos_model") else "   (its own default model)")
+              + "   the phone picks it under New chat")
     print(f"Limits:     {kept['minutes_per_prompt']} min a prompt, {kept['at_once']} at once, "
           f"a silent chat counts as finished after {kept['silent_minutes']} min")
     me = str(pid)
