@@ -2,6 +2,17 @@
   "note": "The one list of versions. The phone page shows it under Version history; CHANGELOG.md and the Versions part of the README are made from it by scripts/make_changelog.py.",
   "releases": [
     {
+      "version": "1.5.0",
+      "date": "2026-11-25",
+      "title": "New chat from the phone, and what the desk is doing while it works",
+      "changes": [
+        "**New chat** at the top of the chat list: the first prompt opens a chat in phone mode on that computer, and its phone desk carries it out. The chat joins the list under the first words of the prompt. A computer whose desk does not run says so instead of taking the prompt.",
+        "While the desk works on a prompt, the chat shows a live card: the app, how long it has worked, and its last steps (each tool it uses). The status line says **The desk is working on it**, and All chats shows the last step. `status` and `desk.py status` say the same on the computer.",
+        "Fixed: a chat whose answer said `~20:25` (about 20:25) failed every next prompt with **Could not determine home directory**: the desk read the `~` as a home folder. A `~` now counts as a path only before a slash, and an odd one is skipped.",
+        "`agent` in `desk.json` may be a list (a program and its first arguments). The desk's tests run on Windows."
+      ]
+    },
+    {
       "version": "1.4.2",
       "date": "2026-11-22",
       "pr": 16,

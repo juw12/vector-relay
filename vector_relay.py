@@ -64,7 +64,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 RELAY = "https://vector-relay.pages.dev"  # the page and the relay live at one address
 KINDS = ("update", "result", "error", "note", "prompt")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
@@ -98,6 +98,8 @@ PICTURE_SIDE, PICTURE_BYTES = 1600, 600_000  # a picture for the phone: longest 
 PHOTO_CHARS = 1_000_000  # a photo from the phone, as base64
 FILES_KEPT_S = 14 * 24 * 3600
 CHAT_KEPT_S = 24 * 3600  # a chat that went off stays on the phone this long
+NEW_LABEL = 40  # characters of the first prompt that name a chat started from the phone
+WORK_STEPS, WORK_STEP = 8, 160  # what the desk is doing for a chat: its last steps, and characters in one
 
 ENDINGS = ("shipped", "partial", "dropped", "done")  # how a chat on the board can end
 BOARD_ROWS = 40  # chats on the board: the running ones first, then the ones that ended last
@@ -291,6 +293,48 @@ def listening(folder: Path, chat: str = "") -> bool:
     return False
 
 
+def alive(pid: int) -> bool:
+    """True while the process with this pid runs."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":  # os.kill(pid, 0) ENDS a process on Windows: ask for its exit code instead
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        answered = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return bool(answered) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def desk_pid(folder: Path) -> int:
+    """The pid of the phone desk that runs for this data folder, or 0."""
+    try:
+        pid = int((folder / "desk.pid").read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return 0
+    return pid if alive(pid) else 0
+
+
+def desk_work(folder: Path, chat: str) -> dict | None:
+    """What the phone desk is doing for this chat right now: since when, with which app, its last steps. None when idle."""
+    found = read_json(folder / f"working-{chat}.json", None)
+    if not isinstance(found, dict) or not found.get("pid") or found.get("pid") != desk_pid(folder):
+        return None  # nothing, or left behind by a desk that is gone
+    steps = [[int(step[0]), one_line(str(step[1]), WORK_STEP)] for step in found.get("steps", [])
+             if isinstance(step, list) and len(step) == 2 and isinstance(step[0], (int, float))][-WORK_STEPS:]
+    return {"since": int(found.get("since", 0)), "app": str(found.get("app", ""))[:40], "steps": steps}
+
+
 def desk_holds(folder: Path, chat: str) -> bool:
     """True while the phone desk, not the chat itself, holds this chat's line."""
     try:
@@ -317,7 +361,8 @@ def chat_list(folder: Path) -> list[dict]:
     events = read_feed(folder)
     return [
         {"id": chat, "label": entry["label"], "on": entry["on"], "since": entry["since"], "listening": listening(folder, chat),
-         "desk": desk_holds(folder, chat), "done": finished_at(events, chat)}
+         "desk": desk_holds(folder, chat), "done": finished_at(events, chat),
+         **({"work": work} if (work := desk_work(folder, chat)) else {})}
         for chat, entry in chats(folder).items() if entry["on"] or now - entry["since"] < CHAT_KEPT_S
     ]
 
@@ -430,7 +475,7 @@ def feed_answer(folder: Path, after: int = 0, limit: int = FEED_EVENTS, text_max
     chosen.reverse()
     return {
         "ok": True, "v": VERSION, "pc": int(time.time()), "mode": mode(folder), "listening": listening(folder),
-        "deviceName": device_name(),
+        "deviceName": device_name(), "desk": bool(desk_pid(folder)),
         "chats": chat_list(folder), "waiting": waiting_ids(folder), "last": last, "events": chosen,
         "board": board_rows(folder), "machine": str(settings(folder).get("notesThis", ""))[:40],
     }
@@ -813,6 +858,34 @@ def answer_ask(folder: Path, key: bytes, seen: list[str], body: str, clock=time.
                     break
                 return {"ok": True, "n": event["n"], "type": "image/jpeg", "data": base64.b64encode(raw).decode("ascii")}
         return {"ok": False, "error": "gone"}
+    if route == "new":  # New chat on the page: a chat in phone mode is opened here, and the phone desk carries its first prompt out
+        with_photo = bool(ask.get("img"))
+        text = str(ask.get("text", "")).strip() or ("(photo)" if with_photo else "")
+        prompt_id = str(ask.get("pid", ""))
+        try:
+            age = abs(clock() - float(ask.get("t", 0)) / 1000)
+        except (TypeError, ValueError):
+            age = PROMPT_MAX_AGE_S + 1
+        if not text or len(text) > MAX_PROMPT or not PROMPT_ID.match(prompt_id):
+            return {"ok": False, "error": "bad"}
+        if prompt_id in seen:  # the phone asks again for one it sent: the chat it opened then
+            chat = next((str(event.get("chat", "")) for event in read_feed(folder) if event.get("id") == prompt_id), "")
+        else:
+            if age > (PHOTO_MAX_AGE_S if with_photo else PROMPT_MAX_AGE_S):
+                return {"ok": False, "error": "old"}
+            if not desk_pid(folder):  # nothing would carry the prompt out
+                return {"ok": False, "error": "desk"}
+            photo = keep_photo(folder, prompt_id, ask) if with_photo else None
+            if with_photo and photo is None:
+                return {"ok": False, "error": "photo"}
+            seen.append(prompt_id)
+            del seen[:-SEEN_KEPT]
+            write_json(folder / "seen.json", seen)
+            label = str(ask.get("label", "")).strip() or text
+            chat = open_chat(folder, one_line(label, NEW_LABEL))
+            put_prompt(folder, chat, prompt_id, text, str(files(folder) / photo["f"]) if photo else "")
+            add_event(folder, "prompt", text, source="phone", id=prompt_id, chat=chat, **({"img": photo} if photo else {}))
+        return {**feed_answer(folder, after), "chat": chat}
     if route == "prompt":
         with_photo = bool(ask.get("img"))
         text = str(ask.get("text", "")).strip() or ("(photo)" if with_photo else "")
@@ -1622,10 +1695,8 @@ def command_pair(folder: Path, relay: str, page: str, show_link: bool, open_pict
     return offer_code(folder) if code else 0
 
 
-def command_on(folder: Path, label: str, named: str) -> int:
-    if not paired(settings(folder)):
-        print(f"Not linked to a phone yet. Run:  {ME} pair --open")
-        return 2
+def open_chat(folder: Path, label: str, named: str = "") -> str:
+    """Puts a chat in phone mode: the named one, or a new one. Returns its id."""
     now = int(time.time())
     with locked(folder):
         found = chats(folder)
@@ -1641,6 +1712,15 @@ def command_on(folder: Path, label: str, named: str) -> int:
     board_step(folder, chat, title=label, own=False)  # a chat in phone mode is on the board without asking
     if not was_on:
         add_event(folder, "note", "Phone mode on" + (f": {label}" if label else ""), chat=chat)
+    return chat
+
+
+def command_on(folder: Path, label: str, named: str) -> int:
+    if not paired(settings(folder)):
+        print(f"Not linked to a phone yet. Run:  {ME} pair --open")
+        return 2
+    now = int(time.time())
+    chat = open_chat(folder, label, named)
     for old in files(folder).glob("*"):
         try:
             if now - old.stat().st_mtime > FILES_KEPT_S:
@@ -1921,7 +2001,11 @@ def command_status(folder: Path) -> int:
         if entry["on"]:
             done, held = finished_at(events, chat), desk_holds(folder, chat)
             at = time.strftime("%H:%M", time.localtime(done)) if done else ""
-            if listening(folder, chat) and not held:
+            work = desk_work(folder, chat)
+            if work:
+                last = work["steps"][-1][1] if work["steps"] else ""
+                state = f"the desk works on it ({work['app']}, {int(time.time() - work['since']) // 60} min)" + (f", now: {last}" if last else "")
+            elif listening(folder, chat) and not held:
                 state = "waiting for a prompt"
             elif done:
                 state = f"finished {at}, " + ("send a prompt any time" if held else "no desk runs to take a prompt")

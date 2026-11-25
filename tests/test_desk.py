@@ -38,7 +38,9 @@ class DeskCase(unittest.TestCase):
         else:
             self.agent.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{fake}" "$@"\n', encoding="utf-8")
             self.agent.chmod(self.agent.stat().st_mode | stat.S_IXUSR)
-        relay.write_json(self.folder / "desk.json", {"agent": str(self.agent), "minutes_per_prompt": 1})
+        # on Windows the agent is started through Python: a .cmd shim would cut the message at its first line
+        agent = [sys.executable, str(fake)] if os.name == "nt" else str(self.agent)
+        relay.write_json(self.folder / "desk.json", {"agent": agent, "minutes_per_prompt": 1})
 
     def chat(self, name: str, *said: tuple[str, str]) -> str:
         """A chat in phone mode that has posted these (kind, text) lines."""
@@ -215,6 +217,54 @@ class CarriedOut(DeskCase):
         job.join(timeout=20)
         self.assertFalse(job.is_alive())
         self.assertIn("was stopped while it worked", self.said(chat, "error")[-1])
+
+
+class AboutAndHome(DeskCase):
+    """2026-11-24: a chat whose answer said "~20:25" (about 20:25) failed every next prompt with
+    'Could not determine home directory.': the ~ was read as the home folder of a user "20:25"."""
+
+    def test_a_tilde_that_means_about_is_no_path(self) -> None:
+        self.assertEqual(desk.PATH_IN_TEXT.findall("read just now (24 Nov, ~20:25), ~22 tasks, ~59 min"), [])
+        self.assertEqual(desk.PATH_IN_TEXT.findall("see ~/Projects/x and ~\\Work\\y"), ["~/Projects/x", "~\\Work\\y"])
+
+    def test_a_chat_that_said_about_a_time_still_takes_the_next_prompt(self) -> None:
+        chat = self.chat("tild", ("result", "Read from Task Scheduler (24 Nov, ~20:25). Approx ~81 tasks + ~12 items, ~59 min."))
+        relay.put_prompt(self.folder, chat, "p1", "which r in asus, which r in mac?")
+        self.look()
+        self.assertEqual(self.said(chat, "error"), [])
+        self.assertIn("last=which r in asus, which r in mac?", self.said(chat, "result")[-1])
+
+    def test_no_known_home_folder_falls_back_to_the_desk_s_own(self) -> None:
+        feed = [{"n": 1, "t": 1, "kind": "result", "from": "pc", "chat": "home", "text": "see ~/Projects/x and ~bob/y"}]
+        with mock.patch.object(Path, "home", side_effect=RuntimeError("Could not determine home directory.")), \
+                mock.patch.object(Path, "expanduser", side_effect=RuntimeError("Could not determine home directory.")):
+            self.assertEqual(desk.work_folder(feed, "home", desk.desk_settings(self.folder), self.folder), self.folder / "desk-work")
+
+
+class LiveWork(DeskCase):
+    """What the desk is doing for a chat travels to the phone while it works, and is gone after."""
+
+    def test_the_steps_show_while_the_desk_works_and_go_when_it_is_done(self) -> None:
+        chat = self.chat("live", ("result", "Done."))
+        (self.folder / "desk.pid").write_text(str(os.getpid()), encoding="ascii")
+        work = desk.Work(self.folder, chat, "OpenCode", "started in C:\\x")
+        work.step("shell: git status")
+        work.step("shell: git status")  # the same step twice is one step
+        seen = [entry for entry in relay.chat_list(self.folder) if entry["id"] == chat][0]["work"]
+        self.assertEqual(seen["app"], "OpenCode")
+        self.assertEqual([step[1] for step in seen["steps"]], ["started in C:\\x", "shell: git status"])
+        for number in range(relay.WORK_STEPS + 3):
+            work.step(f"step {number}")
+        self.assertEqual(len(relay.desk_work(self.folder, chat)["steps"]), relay.WORK_STEPS)
+        (self.folder / "desk.pid").unlink()
+        self.assertIsNone(relay.desk_work(self.folder, chat))  # left behind by a desk that is gone
+
+    def test_after_a_prompt_nothing_is_left_at_work(self) -> None:
+        chat = self.chat("gone", ("result", "Done."))
+        relay.put_prompt(self.folder, chat, "p1", "hello")
+        self.look()
+        self.assertTrue(self.said(chat, "result"))
+        self.assertFalse((self.folder / f"working-{chat}.json").exists())
 
 
 class ChosenInCairn(DeskCase):
