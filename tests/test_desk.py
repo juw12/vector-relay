@@ -297,6 +297,89 @@ class LiveWork(DeskCase):
         self.assertFalse((self.folder / f"working-{chat}.json").exists())
 
 
+class WithTalos(DeskCase):
+    """Talos next to OpenCode: the phone picks one for a new chat, and the chat stays with it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        kept = relay.read_json(self.folder / "desk.json", {})
+        relay.write_json(self.folder / "desk.json", {
+            **kept, "talos": [sys.executable, str(REPO / "tests" / "fake_talos.py")], "talos_env": {"TALOS_TEST": "set"}})
+
+    def test_the_desk_says_which_agents_it_has(self) -> None:
+        self.look()
+        self.assertEqual(relay.read_json(self.folder / "desk-agents.json", None),
+                         [{"id": "opencode", "name": "OpenCode"}, {"id": "talos", "name": "Talos"}])
+        self.assertEqual(relay.desk_agents(self.folder), [])  # no desk runs: the phone is offered nothing
+        (self.folder / "desk.pid").write_text(str(os.getpid()), encoding="ascii")
+        self.assertEqual([row["id"] for row in relay.desk_agents(self.folder)], ["opencode", "talos"])
+        self.assertEqual([row["name"] for row in relay.feed_answer(self.folder)["agents"]], ["OpenCode", "Talos"])
+
+    def test_without_talos_only_opencode_is_offered(self) -> None:
+        kept = relay.read_json(self.folder / "desk.json", {})
+        relay.write_json(self.folder / "desk.json", {**kept, "talos": [str(self.folder / "no-talos-here")]})
+        self.look()
+        self.assertEqual(relay.read_json(self.folder / "desk-agents.json", None), [{"id": "opencode", "name": "OpenCode"}])
+
+    def test_a_chat_started_with_talos_is_answered_by_talos_with_its_own_check(self) -> None:
+        chat = self.chat("talo")
+        relay.put_prompt(self.folder, chat, "p1", "What is 30 x 40?", agent="talos")
+        self.look()
+        answer = self.said(chat, "result")[-1]
+        self.assertIn("session=tal_fake1", answer)
+        self.assertIn("env=set", answer)  # talos_env reached it
+        self.assertIn("last=What is 30 x 40?", answer)
+        self.assertNotIn("Let me look.", answer)  # only the last message is the answer
+        self.assertTrue(answer.endswith("Talos' own check of this work: checked."))
+        kept = relay.read_json(self.folder / "desk-sessions.json", {})[chat]
+        self.assertEqual((kept["app"], kept["session"]), ("talos", "tal_fake1"))
+
+    def test_the_chat_stays_with_talos_and_its_session_goes_on(self) -> None:
+        chat = self.chat("stay")
+        relay.put_prompt(self.folder, chat, "p1", "one", agent="talos")
+        self.look()
+        kept = relay.read_json(self.folder / "desk-sessions.json", {})[chat]
+        relay.write_json(self.folder / "desk-sessions.json", {chat: {**kept, "session": "tal_kept9"}})
+        relay.put_prompt(self.folder, chat, "p2", "two")  # a follow-up names no agent
+        self.look()
+        self.assertIn("session=tal_kept9", self.said(chat, "result")[-1])
+
+    def test_a_chat_without_a_pick_runs_opencode_as_before(self) -> None:
+        chat = self.chat("norm", ("result", "Done."))
+        relay.put_prompt(self.folder, chat, "p1", "hello")
+        self.look()
+        self.assertIn("session=ses_fake1", self.said(chat, "result")[-1])
+        self.assertEqual(relay.read_json(self.folder / "desk-sessions.json", {})[chat]["app"], "opencode")
+
+    def test_a_session_of_the_other_agent_is_not_passed_on(self) -> None:
+        chat = self.chat("swap", ("result", "Done."))
+        relay.write_json(self.folder / "desk-sessions.json", {chat: {"session": "ses_opencode7", "n": 1, "t": 1}})
+        relay.put_prompt(self.folder, chat, "p1", "hello", agent="talos")
+        self.look()
+        self.assertIn("session=tal_fake1", self.said(chat, "result")[-1])
+
+    def test_talos_model_is_passed_on(self) -> None:
+        kept = relay.read_json(self.folder / "desk.json", {})
+        relay.write_json(self.folder / "desk.json", {**kept, "talos_model": "glow/auto"})
+        chat = self.chat("modl")
+        relay.put_prompt(self.folder, chat, "p1", "hello", agent="talos")
+        self.look()
+        self.assertIn("model=glow/auto", self.said(chat, "result")[-1])
+
+    def test_work_that_changed_nothing_has_no_check_line(self) -> None:
+        chat = self.chat("bare")
+        relay.put_prompt(self.folder, chat, "p1", "UNCHECKED hello", agent="talos")
+        self.look()
+        self.assertNotIn("own check", self.said(chat, "result")[-1])
+
+    def test_a_talos_run_that_stopped_is_an_error_with_its_reason(self) -> None:
+        chat = self.chat("down")
+        relay.put_prompt(self.folder, chat, "p1", "STOPPED hello", agent="talos")
+        self.look()
+        self.assertFalse(self.said(chat, "result"))
+        self.assertIn("the office gateway is down", self.said(chat, "error")[-1])
+
+
 class ChosenInCairn(DeskCase):
     """Cairn says which computer carries a prompt out, and which app."""
 

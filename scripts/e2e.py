@@ -674,7 +674,8 @@ def desk_trip(playwright, expect) -> None:
     desk_process, browser, errors = None, None, []
     try:
         assert run(folder, "pair", "--relay", fake.address, "--page", base).returncode == 0
-        relay.write_json(folder / "desk.json", {"agent": [sys.executable, str(REPO / "tests" / "fake_agent.py")], "minutes_per_prompt": 2})
+        relay.write_json(folder / "desk.json", {"agent": [sys.executable, str(REPO / "tests" / "fake_agent.py")], "minutes_per_prompt": 2,
+                                                "talos": [sys.executable, str(REPO / "tests" / "fake_talos.py")]})
         old = run(folder, "on", "--label", "Atlas FA").stdout.split("chat=")[1][:4]
         run(folder, "say", "--chat", old, "--kind", "result", "Read just now (24 Nov, ~20:25). Approx ~81 tasks, ~59 min.")
         browser = playwright.chromium.launch()
@@ -702,7 +703,7 @@ def desk_trip(playwright, expect) -> None:
         check(len(relay.chats_on(folder)) == 2, "new chat: the computer opened a second chat in phone mode, named after the prompt")
         card = page.locator(".item.work")
         expect(card).to_be_visible(timeout=30_000)
-        expect(card.locator(".work-steps li")).to_have_count(3, timeout=30_000)
+        expect(card.locator(".work-steps li").nth(2)).to_be_visible(timeout=30_000)  # three steps or more: a slow page sees the fourth
         check("OpenCode is working" in card.locator(".work-head").inner_text() and "The desk is working" in page.locator("#status").inner_text(),
               "live: while the desk works, the chat shows a card with the app, how long, and its steps")
         page.screenshot(path=str(REPO / "shots" / "phone-desk-working.png"))
@@ -717,6 +718,24 @@ def desk_trip(playwright, expect) -> None:
         expect(page.locator(".item.result").last).to_contain_text("last=which r in asus", timeout=40_000)
         check(page.locator(".item.error").count() == 0,
               "a chat whose answer said '~20:25' takes the next prompt (no 'Could not determine home directory')")
+
+        page.locator("#menu").tap()
+        page.locator("#newChat").tap()
+        expect(page.locator("#agents .agent")).to_have_count(2, timeout=20_000)
+        check(page.locator("#agents .agent.chosen").inner_text() == "OpenCode", "agents: New chat offers OpenCode and Talos, OpenCode first")
+        page.locator("#agents .agent", has_text="Talos").tap()
+        expect(page.locator("#status")).to_contain_text("Talos carries it out")
+        page.screenshot(path=str(REPO / "shots" / "phone-new-chat-talos.png"))
+        page.locator("#box").fill("what is 30 x 40 in mm2?")
+        page.locator("#send").tap()
+        expect(page.locator("#title")).to_have_text("what is 30 x 40 in mm2?", timeout=30_000)
+        expect(page.locator(".item.result").last).to_contain_text("session=tal_fake1", timeout=40_000)
+        expect(page.locator(".item.result").last).to_contain_text("own check of this work: checked")
+        check(not page.locator("#agents").is_visible(), "agents: Talos answered the chat it was picked for, with its own check; the picker is gone in the chat")
+        page.locator("#box").fill("and in cm2?")
+        page.locator("#send").tap()
+        expect(page.locator(".item.result").last).to_contain_text("last=and in cm2?", timeout=40_000)
+        check("session=tal_fake1" in page.locator(".item.result").last.inner_text(), "agents: the follow-up stays with Talos, in the same session")
         check(not errors, "no script errors on the page" + (f": {errors[:3]}" if errors else ""))
     finally:
         if browser:

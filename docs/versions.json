@@ -2,6 +2,17 @@
   "note": "The one list of versions. The phone page shows it under Version history; CHANGELOG.md and the Versions part of the README are made from it by scripts/make_changelog.py.",
   "releases": [
     {
+      "version": "1.6.0",
+      "date": "2026-11-25",
+      "title": "Talos on the phone: pick who carries out a new chat",
+      "changes": [
+        "The phone desk can start **Talos** ([github.com/juw12/talos](https://github.com/juw12/talos)) as well as OpenCode. On a computer that has both, **New chat** shows one button for each above the prompt box; the page remembers the last pick.",
+        "A chat stays with the agent it was started with, and its next prompts go on in that agent's session. Chats that were started before, and chats put in phone mode at the computer, run OpenCode as they did.",
+        "A Talos chat shows its steps in the live card like an OpenCode one, and when it changed files its answer ends with Talos' own check of that work (**checked**, **check failed**, **re-read only** or **unverified**). A run Talos stopped (no model answered, for one) comes back as an error with its reason.",
+        "Talos is named in `desk.json`: `\"talos\": [\"python\", \"-m\", \"talos\"]`, `\"talos_env\": {\"PYTHONPATH\": \"<Talos' clone>\"}`, and `\"talos_model\"` for another model than Talos' own. It may be left out when the `talos` command is on the PATH. It needs a Talos with `run --events` (2026-11-25 or newer)."
+      ]
+    },
+    {
       "version": "1.5.1",
       "date": "2026-11-25",
       "title": "A prompt from the phone starts in seconds, not minutes",
